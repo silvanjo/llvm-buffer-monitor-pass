@@ -18,6 +18,17 @@ using namespace llvm;
 namespace 
 {
 
+// Node of a linked list used to store information about a dynamically allocated buffer
+// The linked list is becomes instrumented into the transformed target program
+// to have access to the buffer sizes at runtime
+struct BufferNode 
+{
+    void* bufferAddr;           // Address of the allocated buffer
+    size_t bufferSize;          // Size of the buffer
+    struct BufferNode* next;    // Pointer to the next node
+};
+
+
 struct BufferMonitor : public FunctionPass
 {
     static char ID;
@@ -35,6 +46,34 @@ struct BufferMonitor : public FunctionPass
         LLVMContext &context = F.getContext();
         auto module = F.getParent();
         IRBuilder<> builder(context);
+
+        // Create the first node of the linked list
+        StructType *BufferNodeTy = StructType::create(context, "BufferNode");
+        // Define the types of the fields in BufferNode
+        std::vector<Type*> BufferNodeFields;
+        BufferNodeFields.push_back(PointerType::get(Type::getInt8Ty(context), 0)); // bufferAddr
+        BufferNodeFields.push_back(Type::getInt64Ty(context)); // bufferSize
+        BufferNodeFields.push_back(PointerType::get(BufferNodeTy, 0)); // next pointer set to NULL
+        // Set the fields for BufferNodeTy
+        BufferNodeTy->setBody(BufferNodeFields);
+
+        // Get the global variable BufferListHead
+        // Create it if it does not exist
+        GlobalVariable *BufferListHead = module->getGlobalVariable("BufferListHead");
+        if (!BufferListHead) 
+        {
+            std::cout << "Create BufferList." << std::endl;
+
+            // Create the head of the linked list
+            BufferListHead = new GlobalVariable(
+                *module,                                                        // Module
+                PointerType::get(BufferNodeTy, 0),                              // Type
+                false,                                                          // isConstant
+                GlobalVariable::PrivateLinkage,                                 // Use private linkage
+                ConstantPointerNull::get(PointerType::get(BufferNodeTy, 0)),    // Initializer
+                "BufferListHead"                                                // Name
+            );
+        }
 
         // Get main function
         Function* mainFunction = module->getFunction("main");
@@ -73,11 +112,26 @@ struct BufferMonitor : public FunctionPass
         Value* mode = builder.CreateGlobalStringPtr("w");
         Value* file_ptr = builder.CreateCall(fopenFunc, {filename, mode});
 
-        // Iterate over all instructions in the function
+        // Get or insert the malloc function
+        Function* mallocFunc = module->getFunction("malloc");
+        if (!mallocFunc) 
+        {
+            std::vector<Type*> mallocArgTypes;
+            mallocArgTypes.push_back(Type::getInt64Ty(context));
+            FunctionType* mallocFuncType = FunctionType::get(Type::getInt8PtrTy(context), mallocArgTypes, false);
+            mallocFunc = Function::Create(mallocFuncType, Function::ExternalLinkage, "malloc", module);
+        }
 
+        // Get data layout of the module to exactly determine the size of the BufferNode struct
+        const DataLayout &DL = module->getDataLayout();
+
+        Instruction* instructionBehindNewlyInsertedCall = nullptr;
+
+        // Iterate over all instructions in the function
         for (inst_iterator I = inst_begin(F), E = inst_end(F); I != E; ++I) 
         {
-
+            
+            // Check if the current instruction is an alloca instruction
             if (AllocaInst* allocaInst = dyn_cast<AllocaInst>(&*I))
             {
 
@@ -117,11 +171,36 @@ struct BufferMonitor : public FunctionPass
                         // get buffer name
                         std::string dynBufferName = callInst->getName().str();   
 
+                        // Set insert point behind the current instruction
+                        builder.SetInsertPoint(I->getNextNode());
+                        instructionBehindNewlyInsertedCall = I->getNextNode();
+
+                        // Determine size of BufferNode struct for malloc instruction
+                        uint64_t size = DL.getTypeAllocSize(BufferNodeTy);
+                        ConstantInt* sizeofBufferNode = ConstantInt::get(Type::getInt64Ty(context), size);
+
+                        // Initialize the new Node
+                        Value* bufferAddress = callInst;                                                    // get address of allocated buffer
+                        Value* bufferSize = callInst->getArgOperand(0);                                     // get size of allocated buffer
+                        Value* nullPtr = ConstantPointerNull::get(PointerType::get(BufferNodeTy, 0));       // set next node to NULL
+
+                        // Create malloc call to create new BufferNode storing address and size of a dynamically allocated buffer
+                        Value* newNode = builder.CreateCall(mallocFunc, sizeofBufferNode);
+
+                        // Cast the return value of malloc to BufferNodeTy
+                        newNode = builder.CreateBitCast(newNode, PointerType::getUnqual(BufferNodeTy));
+
+                        builder.CreateStore(bufferAddress, builder.CreateStructGEP(BufferNodeTy, newNode, 0));  // Store address
+                        builder.CreateStore(bufferSize, builder.CreateStructGEP(BufferNodeTy, newNode, 1));     // Store size
+                        builder.CreateStore(nullPtr, builder.CreateStructGEP(BufferNodeTy, newNode, 2));        // Set next to nullptr
+
+                        // Insert the new node at the beginning of the linked list
+                        Value* currentHead = builder.CreateLoad(BufferListHead->getType()->getPointerElementType(), BufferListHead, "currentHead");
+                        builder.CreateStore(newNode, BufferListHead);                                           // Update the head of the list to point to the new node
+                        builder.CreateStore(currentHead, builder.CreateStructGEP(BufferNodeTy, newNode, 2));    // Set next of the new node to previous head
+
                         // add buffer to buffer map
                         bufferMap[dynBufferName] = -1;               
-
-                        // get size of allocation
-                        Value* mallocSize = callInst->getArgOperand(0);    
 
                         // Create output string for the file
                         std::string outputString = "Heap allocation of size: %d\n";
@@ -130,7 +209,7 @@ struct BufferMonitor : public FunctionPass
                         Value* formatString = builder.CreateGlobalStringPtr(outputString, "fileFormatString", 0, module);
                         
                         // Call fprintf to write the size of the dynamically allocated array to the file
-                        builder.CreateCall(fprintfFunc, { file_ptr, formatString, mallocSize });
+                        builder.CreateCall(fprintfFunc, { file_ptr, formatString, bufferSize });
                     }
                 }
             }
@@ -189,8 +268,6 @@ struct BufferMonitor : public FunctionPass
             builder.CreateCall(fcloseFunc, {file_ptr});
         }
 
-
-
         // Print each detected buffer and its size
 
         for (const auto& buffer : bufferMap)
@@ -200,12 +277,9 @@ struct BufferMonitor : public FunctionPass
 
         return true;
     }
-
-  
 };
 
 } // namespace
-
 
 char BufferMonitor::ID = 0;
 static RegisterPass<BufferMonitor> X("buffer_monitor", "Monitors buffer accesses");

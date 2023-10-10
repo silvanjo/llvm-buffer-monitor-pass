@@ -68,12 +68,6 @@ struct BufferMonitor : public FunctionPass
         FunctionCallee fprintfFuncCallee = module->getOrInsertFunction("fprintf", fprintfType);
         Function* fprintfFunc = cast<Function>(fprintfFuncCallee.getCallee());
 
-        // If the currently processed function is the main function open a file to write to
-        if (F.getName() == "main") 
-        {
-            std::cout << "Currently processing main function." << std::endl;
-        }
-
         // Open the file for writing in the beginning of the main function
         Value* filename = builder.CreateGlobalStringPtr("output.txt");
         Value* mode = builder.CreateGlobalStringPtr("w");
@@ -178,11 +172,24 @@ struct BufferMonitor : public FunctionPass
         }
 
         // Close file using fclose function
-        /*std::vector<Type*> fcloseArgs;
-        fcloseArgs.push_back(PointerType::getUnqual(Type::getInt8Ty(context))); // FILE* argument
-        FunctionType* fcloseType = FunctionType::get(Type::getInt32Ty(context), fcloseArgs, false); 
-        FunctionCallee fcloseFunc = module->getOrInsertFunction("fclose", fcloseType);
-        builder.CreateCall(fcloseFunc, {file_ptr});*/
+
+
+        // If the currently processed function is the main function close the file
+        if (F.getName() == "main") 
+        {
+            std::cout << "Currently processing main function." << std::endl;
+            std::cout << "Closing file." << std::endl;
+
+            std::vector<Type*> fcloseArgs;
+            fcloseArgs.push_back(PointerType::getUnqual(Type::getInt8Ty(context))); // FILE* argument
+            FunctionType* fcloseType = FunctionType::get(Type::getInt32Ty(context), fcloseArgs, false); 
+            FunctionCallee fcloseFunc = module->getOrInsertFunction("fclose", fcloseType);
+            BasicBlock &LastBlock = F.back();   // Set insert point to last block of function
+            builder.SetInsertPoint(LastBlock.getTerminator());
+            builder.CreateCall(fcloseFunc, {file_ptr});
+        }
+
+
 
         // Print each detected buffer and its size
 

@@ -29,13 +29,25 @@ struct BufferNode
 };
 
 
-struct BufferMonitor : public FunctionPass
+struct BufferMonitor : public ModulePass
 {
     static char ID;
 
-    BufferMonitor() : FunctionPass(ID) { }
+    BufferMonitor() : ModulePass(ID) { }
 
-    virtual bool runOnFunction(Function& F)
+    virtual bool runOnModule(Module& M)
+    {
+        // Iterate over all functions in the module
+        for (auto& F : M)
+        {
+            // Process each function
+            procesFunction(F);
+        }
+
+        return true;
+    }
+
+    bool procesFunction(Function& F)
     {
         std::cout << "Pass on " << F.getName().str() << std::endl;
 
@@ -125,12 +137,12 @@ struct BufferMonitor : public FunctionPass
         // Get data layout of the module to exactly determine the size of the BufferNode struct
         const DataLayout &DL = module->getDataLayout();
 
-        Instruction* instructionBehindNewlyInsertedCall = nullptr;
-
-        // Iterate over all instructions in the function
-        for (inst_iterator I = inst_begin(F), E = inst_end(F); I != E; ++I) 
+        auto I = inst_begin(F);
+        auto nextInstruction = I;
+        while (I != inst_end(F))
         {
-            
+            nextInstruction++;
+
             // Check if the current instruction is an alloca instruction
             if (AllocaInst* allocaInst = dyn_cast<AllocaInst>(&*I))
             {
@@ -173,7 +185,9 @@ struct BufferMonitor : public FunctionPass
 
                         // Set insert point behind the current instruction
                         builder.SetInsertPoint(I->getNextNode());
-                        instructionBehindNewlyInsertedCall = I->getNextNode();
+
+                        // Skip to next instruction
+                        nextInstruction++;
 
                         // Determine size of BufferNode struct for malloc instruction
                         uint64_t size = DL.getTypeAllocSize(BufferNodeTy);
@@ -248,10 +262,8 @@ struct BufferMonitor : public FunctionPass
                 }
             } 
 
+            I = nextInstruction;
         }
-
-        // Close file using fclose function
-
 
         // If the currently processed function is the main function close the file
         if (F.getName() == "main") 
@@ -268,8 +280,7 @@ struct BufferMonitor : public FunctionPass
             builder.CreateCall(fcloseFunc, {file_ptr});
         }
 
-        // Print each detected buffer and its size
-
+        // Print each detected static buffer
         for (const auto& buffer : bufferMap)
         {
             std::cout << "Buffer: " << buffer.first << ", Size: " << buffer.second << std::endl;

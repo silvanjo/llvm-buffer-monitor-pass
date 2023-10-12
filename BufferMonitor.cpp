@@ -37,15 +37,22 @@ struct BufferMonitor : public ModulePass
     GlobalVariable* BufferListHead; 
     StructType* BufferNodeTy;
 
+    Module* module;
+
+    std::unique_ptr<IRBuilder<>> builder;
+
+    // map of buffer names to buffer sizes
+    std::map<std::string, int> bufferMap;
+
     BufferMonitor() : ModulePass(ID) { }
 
     virtual bool runOnModule(Module& M)
     {
-        auto module = &M;
+        module = &M;
 
         // Get context, module and create IRBuilder for instrumentations
-        LLVMContext &context = M.getContext();
-        IRBuilder<> builder(context);
+        LLVMContext& context = M.getContext();
+        builder = std::make_unique<IRBuilder<>>(context);
 
         // Create the first node of the linked list
         BufferNodeTy = StructType::create(context, "BufferNode");
@@ -89,13 +96,7 @@ struct BufferMonitor : public ModulePass
     {
         std::cout << "Pass on " << F.getName().str() << std::endl;
 
-        // map of buffer names to buffer sizes
-        std::map<std::string, int> bufferMap;
-
-        // Get context, module and create IRBuilder for instrumentations
-        LLVMContext &context = F.getContext();
-        auto module = F.getParent();
-        IRBuilder<> builder(context);
+        LLVMContext& context = F.getContext();
 
         // Get main function
         Function* mainFunction = module->getFunction("main");
@@ -106,12 +107,12 @@ struct BufferMonitor : public ModulePass
         }
 
         // Open the file for writing in the beginning of the main function
-        builder.SetInsertPoint(&mainFunction->getEntryBlock().front());
+        builder->SetInsertPoint(&mainFunction->getEntryBlock().front());
         
         // Get printf function
         std::vector<Type*> printfArgsTypes;
         printfArgsTypes.push_back(Type::getInt8PtrTy(context));
-        FunctionType* printfFunctionType = FunctionType::get(builder.getInt32Ty(), printfArgsTypes, true);
+        FunctionType* printfFunctionType = FunctionType::get(builder->getInt32Ty(), printfArgsTypes, true);
         
         Function* printfFunction = module->getFunction("printf");
         if (!printfFunction) 
@@ -130,9 +131,9 @@ struct BufferMonitor : public ModulePass
         Function* fprintfFunc = cast<Function>(fprintfFuncCallee.getCallee());
 
         // Open the file for writing in the beginning of the main function
-        Value* filename = builder.CreateGlobalStringPtr("output.txt");
-        Value* mode = builder.CreateGlobalStringPtr("w");
-        Value* file_ptr = builder.CreateCall(fopenFunc, {filename, mode});
+        Value* filename = builder->CreateGlobalStringPtr("output.txt");
+        Value* mode = builder->CreateGlobalStringPtr("w");
+        Value* file_ptr = builder->CreateCall(fopenFunc, {filename, mode});
 
         // Get or insert the malloc function
         Function* mallocFunc = module->getFunction("malloc");
@@ -194,7 +195,7 @@ struct BufferMonitor : public ModulePass
                         std::string dynBufferName = callInst->getName().str();   
 
                         // Set insert point behind the current instruction
-                        builder.SetInsertPoint(I->getNextNode());
+                        builder->SetInsertPoint(I->getNextNode());
 
                         // Skip to next instruction
                         nextInstruction++;
@@ -209,19 +210,19 @@ struct BufferMonitor : public ModulePass
                         Value* nullPtr = ConstantPointerNull::get(PointerType::get(BufferNodeTy, 0));       // set next node to NULL
 
                         // Create malloc call to create new BufferNode storing address and size of a dynamically allocated buffer
-                        Value* newNode = builder.CreateCall(mallocFunc, sizeofBufferNode);
+                        Value* newNode = builder->CreateCall(mallocFunc, sizeofBufferNode);
 
                         // Cast the return value of malloc to BufferNodeTy
-                        newNode = builder.CreateBitCast(newNode, PointerType::getUnqual(BufferNodeTy));
+                        newNode = builder->CreateBitCast(newNode, PointerType::getUnqual(BufferNodeTy));
 
-                        builder.CreateStore(bufferAddress, builder.CreateStructGEP(BufferNodeTy, newNode, 0));  // Store address
-                        builder.CreateStore(bufferSize, builder.CreateStructGEP(BufferNodeTy, newNode, 1));     // Store size
-                        builder.CreateStore(nullPtr, builder.CreateStructGEP(BufferNodeTy, newNode, 2));        // Set next to nullptr
+                        builder->CreateStore(bufferAddress, builder->CreateStructGEP(BufferNodeTy, newNode, 0));  // Store address
+                        builder->CreateStore(bufferSize, builder->CreateStructGEP(BufferNodeTy, newNode, 1));     // Store size
+                        builder->CreateStore(nullPtr, builder->CreateStructGEP(BufferNodeTy, newNode, 2));        // Set next to nullptr
 
                         // Insert the new node at the beginning of the linked list
-                        Value* currentHead = builder.CreateLoad(BufferListHead->getType()->getPointerElementType(), BufferListHead, "currentHead");
-                        builder.CreateStore(newNode, BufferListHead);                                           // Update the head of the list to point to the new node
-                        builder.CreateStore(currentHead, builder.CreateStructGEP(BufferNodeTy, newNode, 2));    // Set next of the new node to previous head
+                        Value* currentHead = builder->CreateLoad(BufferListHead->getType()->getPointerElementType(), BufferListHead, "currentHead");
+                        builder->CreateStore(newNode, BufferListHead);                                           // Update the head of the list to point to the new node
+                        builder->CreateStore(currentHead, builder->CreateStructGEP(BufferNodeTy, newNode, 2));    // Set next of the new node to previous head
 
                         // add buffer to buffer map
                         bufferMap[dynBufferName] = -1;               
@@ -230,10 +231,10 @@ struct BufferMonitor : public ModulePass
                         std::string outputString = "Heap allocation of size: %d\n";
 
                         // Write size of dynamicallly allocated array to file
-                        Value* formatString = builder.CreateGlobalStringPtr(outputString, "fileFormatString", 0, module);
+                        Value* formatString = builder->CreateGlobalStringPtr(outputString, "fileFormatString", 0, module);
                         
                         // Call fprintf to write the size of the dynamically allocated array to the file
-                        builder.CreateCall(fprintfFunc, { file_ptr, formatString, bufferSize });
+                        builder->CreateCall(fprintfFunc, { file_ptr, formatString, bufferSize });
                     }
                 }
             }
@@ -260,11 +261,10 @@ struct BufferMonitor : public ModulePass
                         // Create output string for the file
                         std::string outputString = "Buffer access: %d (static)\n";
                         // Write the accessed index to the file
-                        Value* formatString = builder.CreateGlobalStringPtr("Buffer access: %d\n");
-                        // Value* formatString = builder.CreateGlobalStringPtr("Index access\n");
+                        Value* formatString = builder->CreateGlobalStringPtr("Buffer access: %d\n");
 
-                        builder.SetInsertPoint(&*I);
-                        builder.CreateCall(fprintfFunc, { file_ptr, formatString, indexValue });
+                        builder->SetInsertPoint(&*I);
+                        builder->CreateCall(fprintfFunc, { file_ptr, formatString, indexValue });
                     } else 
                     {
                         std::cout << "Cannot read getelementptr instruction. Index wrong format." << std::endl;
@@ -286,8 +286,8 @@ struct BufferMonitor : public ModulePass
             FunctionType* fcloseType = FunctionType::get(Type::getInt32Ty(context), fcloseArgs, false); 
             FunctionCallee fcloseFunc = module->getOrInsertFunction("fclose", fcloseType);
             BasicBlock &LastBlock = F.back();   // Set insert point to last block of function
-            builder.SetInsertPoint(LastBlock.getTerminator());
-            builder.CreateCall(fcloseFunc, {file_ptr});
+            builder->SetInsertPoint(LastBlock.getTerminator());
+            builder->CreateCall(fcloseFunc, {file_ptr});
         }
 
         // Print each detected static buffer

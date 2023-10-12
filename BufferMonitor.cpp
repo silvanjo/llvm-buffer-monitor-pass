@@ -41,12 +41,25 @@ struct BufferMonitor : public ModulePass
 
     std::unique_ptr<IRBuilder<>> builder;
 
+    Function* mainFunction;
+    Function* printfFunction;
+    Function* fopenFunc;
+    Function* fprintfFunc;
+    Function* mallocFunc;
+
+    Value* filename;
+    Value* mode;
+    Value* file_ptr;
+
     // map of buffer names to buffer sizes
     std::map<std::string, int> bufferMap;
 
-    BufferMonitor() : ModulePass(ID) { }
+    BufferMonitor() : ModulePass(ID)
+    {
+        
+    }
 
-    virtual bool runOnModule(Module& M)
+    bool init(Module& M) 
     {
         module = &M;
 
@@ -82,24 +95,9 @@ struct BufferMonitor : public ModulePass
             );
         }
 
-        // Iterate over all functions in the module
-        for (auto& F : M)
-        {
-            // Process each function
-            procesFunction(F);
-        }
-
-        return true;
-    }
-
-    bool procesFunction(Function& F)
-    {
-        std::cout << "Pass on " << F.getName().str() << std::endl;
-
-        LLVMContext& context = F.getContext();
 
         // Get main function
-        Function* mainFunction = module->getFunction("main");
+        mainFunction = module->getFunction("main");
         if (!mainFunction) 
         {
             std::cout << "No main function found" << std::endl;
@@ -114,7 +112,7 @@ struct BufferMonitor : public ModulePass
         printfArgsTypes.push_back(Type::getInt8PtrTy(context));
         FunctionType* printfFunctionType = FunctionType::get(builder->getInt32Ty(), printfArgsTypes, true);
         
-        Function* printfFunction = module->getFunction("printf");
+        printfFunction = module->getFunction("printf");
         if (!printfFunction) 
         {
             printfFunction = Function::Create(printfFunctionType, Function::ExternalLinkage, "printf", module);
@@ -123,20 +121,20 @@ struct BufferMonitor : public ModulePass
         // Get or insert fopen function for file IO
         FunctionType* FT = FunctionType::get(Type::getInt8PtrTy(context), { Type::getInt8PtrTy(context), Type::getInt8PtrTy(context) }, false);
         FunctionCallee fopenFuncCallee = module->getOrInsertFunction("fopen", FT);
-        Function* fopenFunc = cast<Function>(fopenFuncCallee.getCallee());  
+        fopenFunc = cast<Function>(fopenFuncCallee.getCallee());  
 
         // Get or insert the fprint function for file IO
         FunctionType* fprintfType = FunctionType::get(Type::getInt32Ty(context), { Type::getInt8PtrTy(context), Type::getInt8PtrTy(context) }, true);
         FunctionCallee fprintfFuncCallee = module->getOrInsertFunction("fprintf", fprintfType);
-        Function* fprintfFunc = cast<Function>(fprintfFuncCallee.getCallee());
+        fprintfFunc = cast<Function>(fprintfFuncCallee.getCallee());
 
         // Open the file for writing in the beginning of the main function
-        Value* filename = builder->CreateGlobalStringPtr("output.txt");
-        Value* mode = builder->CreateGlobalStringPtr("w");
-        Value* file_ptr = builder->CreateCall(fopenFunc, {filename, mode});
+        filename = builder->CreateGlobalStringPtr("output.txt");
+        mode = builder->CreateGlobalStringPtr("w");
+        file_ptr = builder->CreateCall(fopenFunc, {filename, mode});
 
         // Get or insert the malloc function
-        Function* mallocFunc = module->getFunction("malloc");
+        mallocFunc = module->getFunction("malloc");
         if (!mallocFunc) 
         {
             std::vector<Type*> mallocArgTypes;
@@ -145,8 +143,47 @@ struct BufferMonitor : public ModulePass
             mallocFunc = Function::Create(mallocFuncType, Function::ExternalLinkage, "malloc", module);
         }
 
+        return true;
+    }
+
+    virtual bool runOnModule(Module& M)
+    {
+        init(M);
+
+        LLVMContext& context = M.getContext();
+
+        // Iterate over all functions in the module
+        for (auto& F : M)
+        {
+            // Process each function
+            procesFunction(F);
+        }
+
+        // Print each detected static buffer
+        for (const auto& buffer : bufferMap)
+        {
+            std::cout << "Buffer: " << buffer.first << ", Size: " << buffer.second << std::endl;
+        }
+
+        std::vector<Type*> fcloseArgs;
+        fcloseArgs.push_back(PointerType::getUnqual(Type::getInt8Ty(context))); // FILE* argument
+        FunctionType* fcloseType = FunctionType::get(Type::getInt32Ty(context), fcloseArgs, false); 
+        FunctionCallee fcloseFunc = module->getOrInsertFunction("fclose", fcloseType);
+        BasicBlock &LastBlock = mainFunction->back();   // Set insert point to last block of function
+        builder->SetInsertPoint(LastBlock.getTerminator());
+        builder->CreateCall(fcloseFunc, {file_ptr});
+
+        return true;
+    }
+
+    bool procesFunction(Function& F)
+    {
+        std::cout << "Pass on " << F.getName().str() << std::endl;
+
+        LLVMContext& context = F.getContext();
+
         // Get data layout of the module to exactly determine the size of the BufferNode struct
-        const DataLayout &DL = module->getDataLayout();
+        const DataLayout& DL = module->getDataLayout();
 
         auto I = inst_begin(F);
         auto nextInstruction = I;
@@ -273,27 +310,6 @@ struct BufferMonitor : public ModulePass
             } 
 
             I = nextInstruction;
-        }
-
-        // If the currently processed function is the main function close the file
-        if (F.getName() == "main") 
-        {
-            std::cout << "Currently processing main function." << std::endl;
-            std::cout << "Closing file." << std::endl;
-
-            std::vector<Type*> fcloseArgs;
-            fcloseArgs.push_back(PointerType::getUnqual(Type::getInt8Ty(context))); // FILE* argument
-            FunctionType* fcloseType = FunctionType::get(Type::getInt32Ty(context), fcloseArgs, false); 
-            FunctionCallee fcloseFunc = module->getOrInsertFunction("fclose", fcloseType);
-            BasicBlock &LastBlock = F.back();   // Set insert point to last block of function
-            builder->SetInsertPoint(LastBlock.getTerminator());
-            builder->CreateCall(fcloseFunc, {file_ptr});
-        }
-
-        // Print each detected static buffer
-        for (const auto& buffer : bufferMap)
-        {
-            std::cout << "Buffer: " << buffer.first << ", Size: " << buffer.second << std::endl;
         }
 
         return true;

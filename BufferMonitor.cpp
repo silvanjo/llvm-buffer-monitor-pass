@@ -33,10 +33,48 @@ struct BufferMonitor : public ModulePass
 {
     static char ID;
 
+    // Head of the linked list storing address and size of dynamically allocated buffers
+    GlobalVariable* BufferListHead; 
+    StructType* BufferNodeTy;
+
     BufferMonitor() : ModulePass(ID) { }
 
     virtual bool runOnModule(Module& M)
     {
+        auto module = &M;
+
+        // Get context, module and create IRBuilder for instrumentations
+        LLVMContext &context = M.getContext();
+        IRBuilder<> builder(context);
+
+        // Create the first node of the linked list
+        BufferNodeTy = StructType::create(context, "BufferNode");
+        // Define the types of the fields in BufferNode
+        std::vector<Type*> BufferNodeFields;
+        BufferNodeFields.push_back(PointerType::get(Type::getInt8Ty(context), 0)); // bufferAddr
+        BufferNodeFields.push_back(Type::getInt64Ty(context)); // bufferSize
+        BufferNodeFields.push_back(PointerType::get(BufferNodeTy, 0)); // next pointer set to NULL
+        // Set the fields for BufferNodeTy
+        BufferNodeTy->setBody(BufferNodeFields);
+        
+        // Get the global variable BufferListHead
+        // Create it if it does not exist
+        BufferListHead = module->getGlobalVariable("BufferListHead");
+        if (!BufferListHead) 
+        {
+            std::cout << "Create BufferList." << std::endl;
+
+            // Create the head of the linked list
+            BufferListHead = new GlobalVariable(
+                *module,                                                        // Module
+                PointerType::get(BufferNodeTy, 0),                              // Type
+                false,                                                          // isConstant
+                GlobalVariable::PrivateLinkage,                                 // Use private linkage
+                ConstantPointerNull::get(PointerType::get(BufferNodeTy, 0)),    // Initializer
+                "BufferListHead"                                                // Name
+            );
+        }
+
         // Iterate over all functions in the module
         for (auto& F : M)
         {
@@ -58,34 +96,6 @@ struct BufferMonitor : public ModulePass
         LLVMContext &context = F.getContext();
         auto module = F.getParent();
         IRBuilder<> builder(context);
-
-        // Create the first node of the linked list
-        StructType *BufferNodeTy = StructType::create(context, "BufferNode");
-        // Define the types of the fields in BufferNode
-        std::vector<Type*> BufferNodeFields;
-        BufferNodeFields.push_back(PointerType::get(Type::getInt8Ty(context), 0)); // bufferAddr
-        BufferNodeFields.push_back(Type::getInt64Ty(context)); // bufferSize
-        BufferNodeFields.push_back(PointerType::get(BufferNodeTy, 0)); // next pointer set to NULL
-        // Set the fields for BufferNodeTy
-        BufferNodeTy->setBody(BufferNodeFields);
-
-        // Get the global variable BufferListHead
-        // Create it if it does not exist
-        GlobalVariable *BufferListHead = module->getGlobalVariable("BufferListHead");
-        if (!BufferListHead) 
-        {
-            std::cout << "Create BufferList." << std::endl;
-
-            // Create the head of the linked list
-            BufferListHead = new GlobalVariable(
-                *module,                                                        // Module
-                PointerType::get(BufferNodeTy, 0),                              // Type
-                false,                                                          // isConstant
-                GlobalVariable::PrivateLinkage,                                 // Use private linkage
-                ConstantPointerNull::get(PointerType::get(BufferNodeTy, 0)),    // Initializer
-                "BufferListHead"                                                // Name
-            );
-        }
 
         // Get main function
         Function* mainFunction = module->getFunction("main");

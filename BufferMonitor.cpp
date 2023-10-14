@@ -10,6 +10,7 @@
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 
 #include <map>
+#include <set>
 #include <string>
 #include <iostream>
 
@@ -19,7 +20,7 @@ namespace
 {
 
 // Node of a linked list used to store information about a dynamically allocated buffer
-// The linked list is becomes instrumented into the transformed target program
+// The linked list becomes instrumented into the transformed target program
 // to have access to the buffer sizes at runtime
 struct BufferNode 
 {
@@ -34,25 +35,29 @@ struct BufferMonitor : public ModulePass
     static char ID;
 
     // Head of the linked list storing address and size of dynamically allocated buffers
-    GlobalVariable* BufferListHead; 
     StructType* BufferNodeTy;
+    GlobalVariable* BufferListHead; 
 
     Module* module;
 
     std::unique_ptr<IRBuilder<>> builder;
 
+    Function* fopenFunc;
+    Function* mallocFunc;
+    Function* fprintfFunc;
     Function* mainFunction;
     Function* printfFunction;
-    Function* fopenFunc;
-    Function* fprintfFunc;
-    Function* mallocFunc;
 
-    Value* filename;
+    // Custom functions
+    Function* getBufferSizeFunction;
+
     Value* mode;
+    Value* filename;
     Value* file_ptr;
 
     // map of buffer names to buffer sizes
     std::map<std::string, int> bufferMap;
+    std::set<Function*> skipFunctions;
 
     BufferMonitor() : ModulePass(ID)
     {
@@ -61,7 +66,7 @@ struct BufferMonitor : public ModulePass
 
     bool init(Module& M) 
     {
-        module = &M;
+        this->module = &M;
 
         // Get context, module and create IRBuilder for instrumentations
         LLVMContext& context = M.getContext();
@@ -143,7 +148,90 @@ struct BufferMonitor : public ModulePass
             mallocFunc = Function::Create(mallocFuncType, Function::ExternalLinkage, "malloc", module);
         }
 
+        this->getBufferSizeFunction = CreateBufferSizeFunction();
+
+        skipFunctions.insert(this->getBufferSizeFunction);
+
         return true;
+    }
+
+    Function* CreateBufferSizeFunction()
+    {
+        LLVMContext& context = this->module->getContext();
+
+        // Define the function signature
+        // Function type: i64(i8*)
+        FunctionType* functionType = FunctionType::get(Type::getInt64Ty(context), 
+                                                Type::getInt8PtrTy(context), 
+                                                false);
+
+        // Create the function
+        Function* getBufferSizeFunction = Function::Create(functionType, 
+                                                    Function::ExternalLinkage, 
+                                                    "getBufferSize", 
+                                                    module);
+
+        // Set function argument name
+        getBufferSizeFunction->arg_begin()->setName("bufferAddress");
+
+        // 2. Define the function body
+        BasicBlock* entry = BasicBlock::Create(context, "entry", getBufferSizeFunction);
+        this->builder->SetInsertPoint(entry);
+
+        // TODO: Traverse the BufferList linked list and compare each node's
+        // buffer address to bufferAddress. If a match is found, set the size
+        // of the buffer to a variable.
+
+        // Load BufferListHead
+        GlobalVariable* bufferListHead = this->module->getNamedGlobal("BufferListHead");
+        Value* current = this->builder->CreateLoad(bufferListHead->getType()->getPointerElementType(), bufferListHead, "current");
+
+        // TODO: Check if bufferLIstHead is null
+        // -------------------------------------
+
+        // Create loop condition, loop body, and exit blocks
+        BasicBlock* loopCond = BasicBlock::Create(context, "loopCond", getBufferSizeFunction);
+        BasicBlock* loopBody = BasicBlock::Create(context, "loopBody", getBufferSizeFunction);
+        BasicBlock* exitBlock = BasicBlock::Create(context, "exit", getBufferSizeFunction);
+
+        this->builder->CreateBr(loopCond);
+        this->builder->SetInsertPoint(loopCond);
+
+        // Loop condition: check if current node is null
+        Value* isEnd = this->builder->CreateIsNull(current, "isEnd");
+        this->builder->CreateCondBr(isEnd, exitBlock, loopBody);
+
+        // Loop body: Check buffer address and traverse the list
+        this->builder->SetInsertPoint(loopBody);
+        Value* nodeDataAddr = this->builder->CreateStructGEP(BufferNodeTy, current, 0, "nodeDataAddr");
+        Value* nodeData = this->builder->CreateLoad(nodeDataAddr->getType()->getPointerElementType(), nodeDataAddr, "nodeData");
+        Value* isMatch = this->builder->CreateICmpEQ(nodeData, getBufferSizeFunction->arg_begin(), "isMatch");
+    
+        // Create blocks for the two possible cases
+        // 1. The current node is a match
+        // 2. The current node is not a match
+        BasicBlock* sizeFound = BasicBlock::Create(context, "sizeFound", getBufferSizeFunction);
+        BasicBlock* nextIteration = BasicBlock::Create(context, "nextIteration", getBufferSizeFunction);
+        this->builder->CreateCondBr(isMatch, sizeFound, nextIteration);
+
+        // If size is found, extract size and return
+        this->builder->SetInsertPoint(sizeFound);
+        Value* dataSizeAddr = this->builder->CreateStructGEP(BufferNodeTy, current, 1, "dataSizeAddr");
+        Value* dataSize = this->builder->CreateLoad(dataSizeAddr->getType()->getPointerElementType(), dataSizeAddr, "dataSize");
+        this->builder->CreateRet(dataSize);
+
+        // Move to next node
+        this->builder->SetInsertPoint(nextIteration);
+        Value* nextNodeAddr = this->builder->CreateStructGEP(BufferNodeTy, current, 2, "nextNodeAddr");
+        Value* nextNode = this->builder->CreateLoad(nextNodeAddr->getType()->getPointerElementType(), nextNodeAddr, "nextNode");
+        this->builder->CreateBr(loopCond);
+        
+        // Exit block: If buffer not found, return -1
+        this->builder->SetInsertPoint(exitBlock);
+        Value* notFoundValue = ConstantInt::get(Type::getInt64Ty(context), -1, true);
+        this->builder->CreateRet(notFoundValue);
+
+        return getBufferSizeFunction;
     }
 
     virtual bool runOnModule(Module& M)
@@ -155,6 +243,10 @@ struct BufferMonitor : public ModulePass
         // Iterate over all functions in the module
         for (auto& F : M)
         {
+            // Functions to be skipped
+            if (skipFunctions.find(&F) != skipFunctions.end())
+                continue;
+
             // Process each function
             procesFunction(F);
         }
@@ -279,15 +371,25 @@ struct BufferMonitor : public ModulePass
             if (GetElementPtrInst* gepInst = dyn_cast<GetElementPtrInst>(&*I)) 
             {
                 // This is a getelementptr instruction, a buffer is being accessed here
-
-                Value* basePtr = gepInst->getPointerOperand();         // get base pointer
                 
                 std::cout << "GetElementPtr detected" << std::endl;
-                
+
+                Value* basePtr = gepInst->getPointerOperand();         // get base pointer
                 std::string bufferName = basePtr->getName().str();     // get buffer name
                 
                 if (bufferMap.find(bufferName) == bufferMap.end())
                     continue;
+
+                builder->SetInsertPoint(&*I);
+
+                // If basePtr is not already i8*, cast it
+                if (basePtr->getType() != Type::getInt8PtrTy(context)) 
+                {
+                    basePtr = builder->CreateBitCast(basePtr, Type::getInt8PtrTy(context));
+                }
+
+                // Get the size of the buffer stored in the linked list
+                Value* bufferSize = builder->CreateCall(getBufferSizeFunction, { basePtr });
 
                 for (auto it = gepInst->idx_begin(); it != gepInst->idx_end(); it++) 
                 {
@@ -296,12 +398,9 @@ struct BufferMonitor : public ModulePass
                     if (indexValue->getType()->isIntegerTy())
                     {
                         // Create output string for the file
-                        std::string outputString = "Buffer access: %d (static)\n";
-                        // Write the accessed index to the file
-                        Value* formatString = builder->CreateGlobalStringPtr("Buffer access: %d\n");
-
-                        builder->SetInsertPoint(&*I);
-                        builder->CreateCall(fprintfFunc, { file_ptr, formatString, indexValue });
+                        std::string outputString = "Buffer access: %d (of size: %d)\n";
+                        Value* formatString = builder->CreateGlobalStringPtr(outputString.c_str());
+                        builder->CreateCall(fprintfFunc, { file_ptr, formatString, indexValue, bufferSize });
                     } else 
                     {
                         std::cout << "Cannot read getelementptr instruction. Index wrong format." << std::endl;

@@ -55,8 +55,7 @@ struct BufferMonitor : public ModulePass
     Value* filename;
     Value* file_ptr;
 
-    // map of buffer names to buffer sizes
-    std::map<std::string, int> bufferMap;
+    // Functions to be skipped
     std::set<Function*> skipFunctions;
 
     BufferMonitor() : ModulePass(ID)
@@ -251,12 +250,6 @@ struct BufferMonitor : public ModulePass
             procesFunction(F);
         }
 
-        // Print each detected static buffer
-        for (const auto& buffer : bufferMap)
-        {
-            std::cout << "Buffer: " << buffer.first << ", Size: " << buffer.second << std::endl;
-        }
-
         // Close file
         std::vector<Type*> fcloseArgs;
         fcloseArgs.push_back(PointerType::getUnqual(Type::getInt8Ty(context))); // FILE* argument
@@ -287,20 +280,8 @@ struct BufferMonitor : public ModulePass
             // Check if the current instruction is an alloca instruction
             if (AllocaInst* allocaInst = dyn_cast<AllocaInst>(&*I))
             {
-                // This is an alloca instruction. A static buffer is being allocated here
-                std::cout << "Alloca instruction detected" << std::endl;
 
-                std::string bufferName = allocaInst->getName().str();   // get name of the allocated buffer
-
-                if (ArrayType* arrayType = dyn_cast<ArrayType>(allocaInst->getAllocatedType()))
-                {
-                    // This is an array allocation
-                    unsigned bufferSizeValue = arrayType->getNumElements(); // get buffer size as number of elements in the array
-
-                    bufferMap[bufferName] = bufferSizeValue;                // add buffer to buffer map
-
-                    std::cout << "Found Buffer [Name= " << bufferName << "] of size: " << bufferSizeValue << std::endl;
-                }
+                // TODO: Insert statically allocated buffer to linked list              
                 
             }
             
@@ -325,9 +306,6 @@ struct BufferMonitor : public ModulePass
 
                         // get buffer name
                         std::string dynBufferName = callInst->getName().str();   
-
-                        // add buffer to buffer map
-                        bufferMap[dynBufferName] = -1;    
 
                         // Set insert point behind the current instruction
                         builder->SetInsertPoint(I->getNextNode());
@@ -379,9 +357,6 @@ struct BufferMonitor : public ModulePass
                 Value* basePtr = gepInst->getPointerOperand();         // get base 
                 
                 std::string bufferName = basePtr->getName().str();     // get buffer name
-                
-                if (bufferMap.find(bufferName) == bufferMap.end())
-                    continue;
 
                 builder->SetInsertPoint(&*I);
                 
@@ -399,9 +374,8 @@ struct BufferMonitor : public ModulePass
                         // Static buffer being accessed
                         std::cout << "Static buffer access" << std::endl;
 
-                        // Get size of buffer
-                        int sizeInt = bufferMap[bufferName];
-                        
+                        int sizeInt = -1;
+
                         // Convert integer to LLVM Value*
                         bufferSize = llvm::ConstantInt::get(builder->getInt32Ty(), sizeInt);
 

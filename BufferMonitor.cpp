@@ -1,5 +1,6 @@
 #include "llvm/Pass.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/Verifier.h"
 #include "llvm/IR/Constant.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/BasicBlock.h"
@@ -8,6 +9,7 @@
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
+
 
 #include <map>
 #include <set>
@@ -49,6 +51,7 @@ struct BufferMonitor : public ModulePass
     Function* printfFunction;
 
     // Custom functions
+    Function* printBufferList;
     Function* getBufferSizeFunction;
 
     Value* mode;
@@ -73,11 +76,13 @@ struct BufferMonitor : public ModulePass
 
         // Create the first node of the linked list
         BufferNodeTy = StructType::create(context, "BufferNode");
+
         // Define the types of the fields in BufferNode
         std::vector<Type*> BufferNodeFields;
         BufferNodeFields.push_back(PointerType::get(Type::getInt8Ty(context), 0)); // bufferAddr
         BufferNodeFields.push_back(Type::getInt64Ty(context)); // bufferSize
         BufferNodeFields.push_back(PointerType::get(BufferNodeTy, 0)); // next pointer set to NULL
+        
         // Set the fields for BufferNodeTy
         BufferNodeTy->setBody(BufferNodeFields);
         
@@ -149,6 +154,12 @@ struct BufferMonitor : public ModulePass
 
         this->getBufferSizeFunction = CreateBufferSizeFunction();
 
+        // Check if function is correct after transformations
+        if (verifyFunction(*this->getBufferSizeFunction, &llvm::errs())) 
+        {
+            llvm::errs() << "Function verification failed after transformations!\n";
+        }
+
         skipFunctions.insert(this->getBufferSizeFunction);
 
         return true;
@@ -197,7 +208,9 @@ struct BufferMonitor : public ModulePass
         this->builder->SetInsertPoint(loopCond);
 
         // Loop condition: check if current node is null
-        Value* isEnd = this->builder->CreateIsNull(current, "isEnd");
+        Type* bufferNodeType = current->getType();
+        Constant* nullConstant = Constant::getNullValue(bufferNodeType);
+        Value* isEnd = this->builder->CreateICmpEQ(current, nullConstant, "isEnd");
         this->builder->CreateCondBr(isEnd, exitBlock, loopBody);
 
         // Loop body: Check buffer address and traverse the list
@@ -227,10 +240,65 @@ struct BufferMonitor : public ModulePass
         
         // Exit block: If buffer not found, return -1
         this->builder->SetInsertPoint(exitBlock);
-        Value* notFoundValue = ConstantInt::get(Type::getInt64Ty(context), -1, true);
+        Value* notFoundValue = ConstantInt::get(Type::getInt64Ty(context), 0, true);
         this->builder->CreateRet(notFoundValue);
 
         return getBufferSizeFunction;
+    }
+
+    void CreatePrintBufferListFunction()
+    {
+        LLVMContext& context = M.getContext();
+
+        // Create the printBufferList function
+        FunctionType* printBufferListType = llvm::FunctionType::get(llvm::Type::getVoidTy(Context), false);
+        this->printBufferList = llvm::Function::Create(printBufferListType, llvm::Function::ExternalLinkage, "printBufferList", &M);
+
+        // Create the entry basic block
+        BasicBlock *entry = llvm::BasicBlock::Create(Context, "entry", printBufferList);
+        builder->SetInsertPoint(entry);
+
+        // Your instrumentation code to create and insert instructions goes here
+        // Use the Builder to insert instructions
+
+        // ...
+
+        // Create the exit basic block and return instruction
+        BasicBlock *exit = llvm::BasicBlock::Create(Context, "exit", printBufferList);
+        builder->SetInsertPoint(exit);
+        builder->CreateRetVoid();
+    }
+
+    // Insert buffer to linked list
+    void InsertBufferToList(Value* bufferAddress, Value* bufferSize)
+    {
+        LLVMContext& context = this->module->getContext();
+
+        // Get data layout of the module to exactly determine the size of the BufferNode struct
+        const DataLayout& DL = module->getDataLayout();
+
+        // Get mull pointer of type BufferNodeTy
+        Value* nullPtr = ConstantPointerNull::get(PointerType::get(BufferNodeTy, 0));       
+
+        // Determine size of BufferNode struct for malloc instruction
+        uint64_t size = DL.getTypeAllocSize(BufferNodeTy);
+        ConstantInt* sizeofBufferNode = ConstantInt::get(Type::getInt64Ty(context), size);
+
+        // Create malloc call to create new BufferNode storing address and size of a dynamically allocated buffer
+        Value* newNode = builder->CreateCall(mallocFunc, sizeofBufferNode);
+
+        // Cast the return value of malloc to BufferNodeTy
+        newNode = builder->CreateBitCast(newNode, PointerType::getUnqual(BufferNodeTy));
+
+        // INitialize the new node
+        builder->CreateStore(bufferAddress, builder->CreateStructGEP(BufferNodeTy, newNode, 0));  // Store address
+        builder->CreateStore(bufferSize, builder->CreateStructGEP(BufferNodeTy, newNode, 1));     // Store size
+        builder->CreateStore(nullPtr, builder->CreateStructGEP(BufferNodeTy, newNode, 2));        // Set next to nullptr
+
+        // Insert the new node at the beginning of the linked list
+        Value* currentHead = builder->CreateLoad(BufferListHead->getType()->getPointerElementType(), BufferListHead, "currentHead");
+        builder->CreateStore(newNode, BufferListHead);                                           // Update the head of the list to point to the new node
+        builder->CreateStore(currentHead, builder->CreateStructGEP(BufferNodeTy, newNode, 2));    // Set next of the new node to previous head           
     }
 
     virtual bool runOnModule(Module& M)
@@ -268,9 +336,6 @@ struct BufferMonitor : public ModulePass
 
         LLVMContext& context = F.getContext();
 
-        // Get data layout of the module to exactly determine the size of the BufferNode struct
-        const DataLayout& DL = module->getDataLayout();
-
         auto I = inst_begin(F);
         auto nextInstruction = I;
         while (I != inst_end(F))
@@ -280,19 +345,36 @@ struct BufferMonitor : public ModulePass
             // Check if the current instruction is an alloca instruction
             if (AllocaInst* allocaInst = dyn_cast<AllocaInst>(&*I))
             {
+                // This is an static allocation
 
-                // TODO: Insert statically allocated buffer to linked list              
-                
+                // Check if the allocated type is an array
+                if (ArrayType* arrayType = dyn_cast<ArrayType>(allocaInst->getAllocatedType()))
+                {
+                    // This is a static buffer allocation
+                    std::cout << "Found a static allocation" << std::endl;
+
+                    // Get the pointer to the alloca'd array
+                    Value* bufferAddress = allocaInst;
+
+                    // Determine the size of the array
+                    unsigned arraySize = arrayType->getNumElements();
+                    
+                    // Convert arraySize to LLVM Value* for inserting into the linked list
+                    LLVMContext& context = allocaInst->getContext();
+                    Value* bufferSizeValue = ConstantInt::get(Type::getInt64Ty(context), arraySize);
+
+                    // Insert the buffer into the linked list
+                    InsertBufferToList(bufferAddress, bufferSizeValue);
+
+                    std::cout << "Allocated array of size " << arraySize << " stored in linked list" << std::endl;
+                }    
             }
             
             if (auto callInst = dyn_cast<CallInst>(&*I)) 
             {
                 // This is an call instruction
 
-                std::cout << "Call instruction detected" << std::endl;
-
                 Function *calledFunc = callInst->getCalledFunction();
-
                 if (calledFunc) 
                 {
                     // Get name of called function
@@ -313,37 +395,15 @@ struct BufferMonitor : public ModulePass
                         // Skip to next instruction
                         nextInstruction++;
 
-                        // Determine size of BufferNode struct for malloc instruction
-                        uint64_t size = DL.getTypeAllocSize(BufferNodeTy);
-                        ConstantInt* sizeofBufferNode = ConstantInt::get(Type::getInt64Ty(context), size);
+                        Value* bufferAddress = callInst;                    // get address of allocated buffer
+                        Value* bufferSize = callInst->getArgOperand(0);     // get size of allocated buffer
 
-                        // Initialize the new Node
-                        Value* bufferAddress = callInst;                                                    // get address of allocated buffer
-                        Value* bufferSize = callInst->getArgOperand(0);                                     // get size of allocated buffer
-                        Value* nullPtr = ConstantPointerNull::get(PointerType::get(BufferNodeTy, 0));       // set next node to NULL
-
-                        // Create malloc call to create new BufferNode storing address and size of a dynamically allocated buffer
-                        Value* newNode = builder->CreateCall(mallocFunc, sizeofBufferNode);
-
-                        // Cast the return value of malloc to BufferNodeTy
-                        newNode = builder->CreateBitCast(newNode, PointerType::getUnqual(BufferNodeTy));
-
-                        builder->CreateStore(bufferAddress, builder->CreateStructGEP(BufferNodeTy, newNode, 0));  // Store address
-                        builder->CreateStore(bufferSize, builder->CreateStructGEP(BufferNodeTy, newNode, 1));     // Store size
-                        builder->CreateStore(nullPtr, builder->CreateStructGEP(BufferNodeTy, newNode, 2));        // Set next to nullptr
-
-                        // Insert the new node at the beginning of the linked list
-                        Value* currentHead = builder->CreateLoad(BufferListHead->getType()->getPointerElementType(), BufferListHead, "currentHead");
-                        builder->CreateStore(newNode, BufferListHead);                                           // Update the head of the list to point to the new node
-                        builder->CreateStore(currentHead, builder->CreateStructGEP(BufferNodeTy, newNode, 2));    // Set next of the new node to previous head           
-
-                        // Create output string for the file
-                        std::string outputString = "Heap allocation of size: %d\n";
+                        // Store dynamically allocated buffer in linked list
+                        InsertBufferToList(bufferAddress, bufferSize);
 
                         // Write size of dynamicallly allocated array to file
+                        std::string outputString = "Heap allocation of size: %d\n";
                         Value* formatString = builder->CreateGlobalStringPtr(outputString, "fileFormatString", 0, module);
-                        
-                        // Call fprintf to write the size of the dynamically allocated array to the file
                         builder->CreateCall(fprintfFunc, { file_ptr, formatString, bufferSize });
                     }
                 }
@@ -368,7 +428,7 @@ struct BufferMonitor : public ModulePass
                     // For Static Buffers we get the size from the bufferMap
                     // For Dynamic Buffers we get the size from the linked list
                     Value* bufferSize = nullptr;
-                    std::string outputString = "Buffer access '" + bufferName + "': %d of size: %d";
+                    std::string outputString = "Buffer access: %d of size: %d";
                     if (AllocaInst* allocaInst = dyn_cast<AllocaInst>(basePtr))
                     {
                         // Static buffer being accessed

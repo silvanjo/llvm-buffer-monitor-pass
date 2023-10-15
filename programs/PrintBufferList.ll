@@ -30,3 +30,7 @@ loop_body:
   %next = load %BufferNode*, %BufferNode** %nextPtr, align 8
   %isEnd = icmp eq %BufferNode* %next, null
   br i1 %isEnd, label %exit, label %loop_body
+
+exit: 
+  ret void
+}

@@ -257,6 +257,7 @@ struct BufferMonitor : public ModulePass
             std::cout << "Buffer: " << buffer.first << ", Size: " << buffer.second << std::endl;
         }
 
+        // Close file
         std::vector<Type*> fcloseArgs;
         fcloseArgs.push_back(PointerType::getUnqual(Type::getInt8Ty(context))); // FILE* argument
         FunctionType* fcloseType = FunctionType::get(Type::getInt32Ty(context), fcloseArgs, false); 
@@ -286,17 +287,17 @@ struct BufferMonitor : public ModulePass
             // Check if the current instruction is an alloca instruction
             if (AllocaInst* allocaInst = dyn_cast<AllocaInst>(&*I))
             {
+                // This is an alloca instruction. A static buffer is being allocated here
+                std::cout << "Alloca instruction detected" << std::endl;
 
-                // This is an alloca instruction, a buffer is being allocated here
-
-                std::string bufferName = allocaInst->getName().str();   // get buffer name
+                std::string bufferName = allocaInst->getName().str();   // get name of the allocated buffer
 
                 if (ArrayType* arrayType = dyn_cast<ArrayType>(allocaInst->getAllocatedType()))
                 {
                     // This is an array allocation
                     unsigned bufferSizeValue = arrayType->getNumElements(); // get buffer size as number of elements in the array
 
-                    bufferMap[bufferName] = bufferSizeValue;               // add buffer to buffer map
+                    bufferMap[bufferName] = bufferSizeValue;                // add buffer to buffer map
 
                     std::cout << "Found Buffer [Name= " << bufferName << "] of size: " << bufferSizeValue << std::endl;
                 }
@@ -313,15 +314,20 @@ struct BufferMonitor : public ModulePass
 
                 if (calledFunc) 
                 {
+                    // Get name of called function
                     StringRef funcName = calledFunc->getName();
+
+                    // Check if called function is malloc or new
                     if (funcName == "malloc" || funcName.startswith("_Znwm") || funcName.startswith("_Znam"))
                     {
                         // This is a heap allocation
-                        
                         std::cout << "Found a heap allocation" << std::endl;
 
                         // get buffer name
                         std::string dynBufferName = callInst->getName().str();   
+
+                        // add buffer to buffer map
+                        bufferMap[dynBufferName] = -1;    
 
                         // Set insert point behind the current instruction
                         builder->SetInsertPoint(I->getNextNode());
@@ -351,10 +357,7 @@ struct BufferMonitor : public ModulePass
                         // Insert the new node at the beginning of the linked list
                         Value* currentHead = builder->CreateLoad(BufferListHead->getType()->getPointerElementType(), BufferListHead, "currentHead");
                         builder->CreateStore(newNode, BufferListHead);                                           // Update the head of the list to point to the new node
-                        builder->CreateStore(currentHead, builder->CreateStructGEP(BufferNodeTy, newNode, 2));    // Set next of the new node to previous head
-
-                        // add buffer to buffer map
-                        bufferMap[dynBufferName] = -1;               
+                        builder->CreateStore(currentHead, builder->CreateStructGEP(BufferNodeTy, newNode, 2));    // Set next of the new node to previous head           
 
                         // Create output string for the file
                         std::string outputString = "Heap allocation of size: %d\n";
@@ -371,34 +374,59 @@ struct BufferMonitor : public ModulePass
             if (GetElementPtrInst* gepInst = dyn_cast<GetElementPtrInst>(&*I)) 
             {
                 // This is a getelementptr instruction, a buffer is being accessed here
-                
                 std::cout << "GetElementPtr detected" << std::endl;
 
-                Value* basePtr = gepInst->getPointerOperand();         // get base pointer
+                Value* basePtr = gepInst->getPointerOperand();         // get base 
+                
                 std::string bufferName = basePtr->getName().str();     // get buffer name
                 
                 if (bufferMap.find(bufferName) == bufferMap.end())
                     continue;
 
                 builder->SetInsertPoint(&*I);
-
-                // If basePtr is not already i8*, cast it
-                if (basePtr->getType() != Type::getInt8PtrTy(context)) 
-                {
-                    basePtr = builder->CreateBitCast(basePtr, Type::getInt8PtrTy(context));
-                }
-
-                // Get the size of the buffer stored in the linked list
-                Value* bufferSize = builder->CreateCall(getBufferSizeFunction, { basePtr });
-
+                
                 for (auto it = gepInst->idx_begin(); it != gepInst->idx_end(); it++) 
                 {
-                   Value* indexValue = it->get();
+                    Value* indexValue = it->get();
+
+                    // Get size of buffer
+                    // For Static Buffers we get the size from the bufferMap
+                    // For Dynamic Buffers we get the size from the linked list
+                    Value* bufferSize = nullptr;
+                    std::string outputString = "Buffer access '" + bufferName + "': %d of size: %d";
+                    if (AllocaInst* allocaInst = dyn_cast<AllocaInst>(basePtr))
+                    {
+                        // Static buffer being accessed
+                        std::cout << "Static buffer access" << std::endl;
+
+                        // Get size of buffer
+                        int sizeInt = bufferMap[bufferName];
+                        
+                        // Convert integer to LLVM Value*
+                        bufferSize = llvm::ConstantInt::get(builder->getInt32Ty(), sizeInt);
+
+                        outputString += " (static)\n";
+                    } else 
+                    {
+                        // Dynamic buffer being accessed
+                        std::cout << "Dynamic buffer access" << std::endl;
+
+                        // Cast the pointer to the buffer to a generic i8* pointer
+                        if (basePtr->getType() != Type::getInt8PtrTy(context)) 
+                        {
+                            basePtr = builder->CreateBitCast(basePtr, Type::getInt8PtrTy(context));
+                        }
+
+                        // Get the size of the buffer stored in the linked list
+                        bufferSize = builder->CreateCall(getBufferSizeFunction, { basePtr });
+                    
+                        outputString += " (dynamic)\n";
+                    }
+
                 
                     if (indexValue->getType()->isIntegerTy())
                     {
                         // Create output string for the file
-                        std::string outputString = "Buffer access: %d (of size: %d)\n";
                         Value* formatString = builder->CreateGlobalStringPtr(outputString.c_str());
                         builder->CreateCall(fprintfFunc, { file_ptr, formatString, indexValue, bufferSize });
                     } else 
@@ -406,6 +434,7 @@ struct BufferMonitor : public ModulePass
                         std::cout << "Cannot read getelementptr instruction. Index wrong format." << std::endl;
                     }
                 }
+
             } 
 
             I = nextInstruction;

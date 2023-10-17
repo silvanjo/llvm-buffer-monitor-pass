@@ -21,7 +21,7 @@ using namespace llvm;
 namespace 
 {
 
-// Node of a linked list used to store information about a dynamically allocated buffer
+// Node of a linked list used to store information about allocated buffer (static and dynamic)
 // The linked list becomes instrumented into the transformed target program
 // to have access to the buffer sizes at runtime
 struct BufferNode 
@@ -51,7 +51,7 @@ struct BufferMonitor : public ModulePass
     Function* printfFunction;
 
     // Custom functions
-    Function* printBufferList;
+    Function* printBufferListFunction;
     Function* getBufferSizeFunction;
 
     Value* mode;
@@ -157,10 +157,22 @@ struct BufferMonitor : public ModulePass
         // Check if function is correct after transformations
         if (verifyFunction(*this->getBufferSizeFunction, &llvm::errs())) 
         {
-            llvm::errs() << "Function verification failed after transformations!\n";
+            llvm::errs() << "getBufferSizeFunction Function verification failed after transformations!\n";
+            this->getBufferSizeFunction->dump();
+        }
+
+        // Create the printBufferList function
+        this->printBufferListFunction = CreatePrintBufferListFunction();
+
+        // Check if function is correct after transformations
+        if (verifyFunction(*this->printBufferListFunction, &llvm::errs())) 
+        {
+            llvm::errs() << "printBufferListFunction Function verification failed after transformations!\n";
+            this->printBufferListFunction->dump();
         }
 
         skipFunctions.insert(this->getBufferSizeFunction);
+        skipFunctions.insert(this->printBufferListFunction);
 
         return true;
     }
@@ -188,33 +200,34 @@ struct BufferMonitor : public ModulePass
         BasicBlock* entry = BasicBlock::Create(context, "entry", getBufferSizeFunction);
         this->builder->SetInsertPoint(entry);
 
-        // TODO: Traverse the BufferList linked list and compare each node's
-        // buffer address to bufferAddress. If a match is found, set the size
-        // of the buffer to a variable.
-
         // Load BufferListHead
         GlobalVariable* bufferListHead = this->module->getNamedGlobal("BufferListHead");
-        Value* current = this->builder->CreateLoad(bufferListHead->getType()->getPointerElementType(), bufferListHead, "current");
+        Value* head = this->builder->CreateLoad(bufferListHead->getType()->getPointerElementType(), bufferListHead, "current");
 
-        // TODO: Check if bufferLIstHead is null
-        // -------------------------------------
+        // Create an alloca instruction to store the current node
+        AllocaInst* currentNodeAlloca = builder->CreateAlloca(head->getType(), 0, "currentNodeAlloca");
+        builder->CreateStore(head, currentNodeAlloca);
 
         // Create loop condition, loop body, and exit blocks
-        BasicBlock* loopCond = BasicBlock::Create(context, "loopCond", getBufferSizeFunction);
+        BasicBlock* checkIfHeadIsNull = BasicBlock::Create(context, "checkIfHeadIsNull", getBufferSizeFunction);
         BasicBlock* loopBody = BasicBlock::Create(context, "loopBody", getBufferSizeFunction);
-        BasicBlock* exitBlock = BasicBlock::Create(context, "exit", getBufferSizeFunction);
+        BasicBlock* exitBlock = BasicBlock::Create(context, "exitBlock", getBufferSizeFunction);
 
-        this->builder->CreateBr(loopCond);
-        this->builder->SetInsertPoint(loopCond);
+        this->builder->CreateBr(checkIfHeadIsNull);
+        this->builder->SetInsertPoint(checkIfHeadIsNull);
 
         // Loop condition: check if current node is null
-        Type* bufferNodeType = current->getType();
+        Type* bufferNodeType = head->getType();
         Constant* nullConstant = Constant::getNullValue(bufferNodeType);
-        Value* isEnd = this->builder->CreateICmpEQ(current, nullConstant, "isEnd");
-        this->builder->CreateCondBr(isEnd, exitBlock, loopBody);
+        Value* headIsNull = this->builder->CreateICmpEQ(head, nullConstant, "isEnd");
+        this->builder->CreateCondBr(headIsNull, exitBlock, loopBody);
 
         // Loop body: Check buffer address and traverse the list
         this->builder->SetInsertPoint(loopBody);
+
+        // Load the current node from memory
+        Value* current = builder->CreateLoad(currentNodeAlloca->getType()->getPointerElementType(), currentNodeAlloca, "current");
+
         Value* nodeDataAddr = this->builder->CreateStructGEP(BufferNodeTy, current, 0, "nodeDataAddr");
         Value* nodeData = this->builder->CreateLoad(nodeDataAddr->getType()->getPointerElementType(), nodeDataAddr, "nodeData");
         Value* isMatch = this->builder->CreateICmpEQ(nodeData, getBufferSizeFunction->arg_begin(), "isMatch");
@@ -236,7 +249,13 @@ struct BufferMonitor : public ModulePass
         this->builder->SetInsertPoint(nextIteration);
         Value* nextNodeAddr = this->builder->CreateStructGEP(BufferNodeTy, current, 2, "nextNodeAddr");
         Value* nextNode = this->builder->CreateLoad(nextNodeAddr->getType()->getPointerElementType(), nextNodeAddr, "nextNode");
-        this->builder->CreateBr(loopCond);
+       
+        // Store nextNode to access is it in the next iteration
+        builder->CreateStore(nextNode, currentNodeAlloca);
+
+        // Check if node is null (end of list)
+        Value* isEnd = this->builder->CreateICmpEQ(nextNode, nullConstant, "isEnd");
+        this->builder->CreateCondBr(isEnd, exitBlock, loopBody);
         
         // Exit block: If buffer not found, return -1
         this->builder->SetInsertPoint(exitBlock);
@@ -246,27 +265,79 @@ struct BufferMonitor : public ModulePass
         return getBufferSizeFunction;
     }
 
-    void CreatePrintBufferListFunction()
+    Function* CreatePrintBufferListFunction()
     {
-        LLVMContext& context = M.getContext();
+        LLVMContext& context = this->module->getContext();
 
         // Create the printBufferList function
-        FunctionType* printBufferListType = llvm::FunctionType::get(llvm::Type::getVoidTy(Context), false);
-        this->printBufferList = llvm::Function::Create(printBufferListType, llvm::Function::ExternalLinkage, "printBufferList", &M);
+        FunctionType* printBufferListType = FunctionType::get(Type::getVoidTy(context), false);
+        Function* printBufferList = Function::Create(printBufferListType, Function::ExternalLinkage, "printBufferList", module);
 
         // Create the entry basic block
-        BasicBlock *entry = llvm::BasicBlock::Create(Context, "entry", printBufferList);
+        BasicBlock *entry = BasicBlock::Create(context, "entry", printBufferList);
         builder->SetInsertPoint(entry);
 
-        // Your instrumentation code to create and insert instructions goes here
-        // Use the Builder to insert instructions
+        // Load BufferListHead
+        GlobalVariable* bufferListHead = this->module->getNamedGlobal("BufferListHead");
+        Value* head = this->builder->CreateLoad(bufferListHead->getType()->getPointerElementType(), bufferListHead, "head");
 
-        // ...
+        // Create an alloca instruction to store the current node
+        AllocaInst* currentNodeAlloca = builder->CreateAlloca(head->getType(), 0, "currentNodeAlloca");
+        builder->CreateStore(head, currentNodeAlloca);
+
+        // Create loop condition, loop body, and exit blocks
+        BasicBlock* checkIfHeadIsNull = BasicBlock::Create(context, "checkIfHeadIsNull", printBufferList);
+        BasicBlock* loopBody = BasicBlock::Create(context, "loopBody", printBufferList);
+        BasicBlock* exit = BasicBlock::Create(context, "exit", printBufferList);
+
+        builder->CreateBr(checkIfHeadIsNull);
+        builder->SetInsertPoint(checkIfHeadIsNull);
+
+        // Check if head node is null 
+        Type* bufferNodeType = head->getType();
+        Constant* nullConstant = Constant::getNullValue(bufferNodeType);
+        Value* headIsNull = this->builder->CreateICmpEQ(head, nullConstant, "isEnd");
+        this->builder->CreateCondBr(headIsNull, exit, loopBody);
+
+        builder->SetInsertPoint(loopBody);
+
+        // Load the current node from memory
+        Value* current = builder->CreateLoad(currentNodeAlloca->getType()->getPointerElementType(), currentNodeAlloca, "current");
+
+        // Fetch the data from the buffer node
+        Value *dataPtr = builder->CreateStructGEP(this->BufferNodeTy, current, 0, "dataPtr");
+        Value *data = builder->CreateLoad(dataPtr->getType()->getPointerElementType(), dataPtr, "data");
+        
+        // Print buffer address
+        std::string formatAddrString = "%p\n";
+        Value* formatAddrStringGlobal = builder->CreateGlobalStringPtr(formatAddrString, "formatAddrString", 0, module);
+        builder->CreateCall(printfFunction, {formatAddrStringGlobal, data});
+
+        // Fetch the dataSize 
+        Value *dataSizePtr = builder->CreateStructGEP(this->BufferNodeTy, current, 1, "dataSizePtr");
+        Value *dataSize = builder->CreateLoad(dataSizePtr->getType()->getPointerElementType(), dataSizePtr, "dataSize");
+        
+        // print bufferSize
+        std::string formatSizeString = "Size: %ld\n";
+        Value* formatSizeStringGlobal = builder->CreateGlobalStringPtr(formatSizeString, "formatSizeString", 0, module);
+        builder->CreateCall(printfFunction, {formatSizeStringGlobal, dataSize});
+
+        // Move to next node
+        Value *nextNodeAddr = this->builder->CreateStructGEP(this->BufferNodeTy, current, 2, "nextNodeAddr");
+        Value *nextNode = this->builder->CreateLoad(nextNodeAddr->getType()->getPointerElementType(), nextNodeAddr, "nextNode");
+
+        // Store nextNode to access is it in the next iteration
+        builder->CreateStore(nextNode, currentNodeAlloca);
+
+        // Check if node is null (end of list)
+        Value* isEnd = this->builder->CreateICmpEQ(nextNode, nullConstant, "isEnd");
+        this->builder->CreateCondBr(isEnd, exit, loopBody);
 
         // Create the exit basic block and return instruction
-        BasicBlock *exit = llvm::BasicBlock::Create(Context, "exit", printBufferList);
         builder->SetInsertPoint(exit);
         builder->CreateRetVoid();
+
+        return printBufferList;
     }
 
     // Insert buffer to linked list
@@ -318,13 +389,18 @@ struct BufferMonitor : public ModulePass
             procesFunction(F);
         }
 
+        // Set insert point to last block of function
+        BasicBlock &LastBlock = mainFunction->back();   
+        builder->SetInsertPoint(LastBlock.getTerminator());
+
+        // Print the linked list containing all buffers
+        builder->CreateCall(this->printBufferListFunction);
+
         // Close file
         std::vector<Type*> fcloseArgs;
         fcloseArgs.push_back(PointerType::getUnqual(Type::getInt8Ty(context))); // FILE* argument
         FunctionType* fcloseType = FunctionType::get(Type::getInt32Ty(context), fcloseArgs, false); 
         FunctionCallee fcloseFunc = module->getOrInsertFunction("fclose", fcloseType);
-        BasicBlock &LastBlock = mainFunction->back();   // Set insert point to last block of function
-        builder->SetInsertPoint(LastBlock.getTerminator());
         builder->CreateCall(fcloseFunc, {file_ptr});
 
         return true;
@@ -342,6 +418,8 @@ struct BufferMonitor : public ModulePass
         {
             nextInstruction++;
 
+            this->builder->SetInsertPoint(&*I);
+
             // Check if the current instruction is an alloca instruction
             if (AllocaInst* allocaInst = dyn_cast<AllocaInst>(&*I))
             {
@@ -353,9 +431,6 @@ struct BufferMonitor : public ModulePass
                     // This is a static buffer allocation
                     std::cout << "Found a static allocation" << std::endl;
 
-                    // Get the pointer to the alloca'd array
-                    Value* bufferAddress = allocaInst;
-
                     // Determine the size of the array
                     unsigned arraySize = arrayType->getNumElements();
                     
@@ -363,7 +438,20 @@ struct BufferMonitor : public ModulePass
                     LLVMContext& context = allocaInst->getContext();
                     Value* bufferSizeValue = ConstantInt::get(Type::getInt64Ty(context), arraySize);
 
-                    // Insert the buffer into the linked list
+                    // Set insert point after current instruction
+                    this->builder->SetInsertPoint(I->getNextNode());
+
+                    // Skip to next instruction
+                    nextInstruction++;
+
+                    // Get the pointer to the alloca'd array
+                    Value* bufferAddress = allocaInst;
+                    // Cast the pointer to the buffer to a generic i8* pointer
+                    if (allocaInst->getType() != Type::getInt8PtrTy(context)) 
+                    {
+                        bufferAddress = builder->CreateBitCast(allocaInst, Type::getInt8PtrTy(context));
+                    }
+                    
                     InsertBufferToList(bufferAddress, bufferSizeValue);
 
                     std::cout << "Allocated array of size " << arraySize << " stored in linked list" << std::endl;
@@ -434,10 +522,10 @@ struct BufferMonitor : public ModulePass
                         // Static buffer being accessed
                         std::cout << "Static buffer access" << std::endl;
 
-                        int sizeInt = -1;
+                        int sizeInt = 0;
 
                         // Convert integer to LLVM Value*
-                        bufferSize = llvm::ConstantInt::get(builder->getInt32Ty(), sizeInt);
+                        bufferSize = ConstantInt::get(builder->getInt32Ty(), sizeInt);
 
                         outputString += " (static)\n";
                     } else 
@@ -453,7 +541,6 @@ struct BufferMonitor : public ModulePass
 
                         // Get the size of the buffer stored in the linked list
                         bufferSize = builder->CreateCall(getBufferSizeFunction, { basePtr });
-                    
                         outputString += " (dynamic)\n";
                     }
 

@@ -28,6 +28,7 @@ struct BufferNode
 {
     void* bufferAddr;           // Address of the allocated buffer
     size_t bufferSize;          // Size of the buffer
+
     struct BufferNode* next;    // Pointer to the next node
 };
 
@@ -57,6 +58,9 @@ struct BufferMonitor : public ModulePass
     Value* mode;
     Value* filename;
     Value* file_ptr;
+
+    // Globals
+    GlobalVariable* globalFilePtr;
 
     // Functions to be skipped
     std::set<Function*> skipFunctions;
@@ -88,8 +92,8 @@ struct BufferMonitor : public ModulePass
         
         // Get the global variable BufferListHead
         // Create it if it does not exist
-        BufferListHead = module->getGlobalVariable("BufferListHead");
-        if (!BufferListHead) 
+        this->BufferListHead = module->getGlobalVariable("BufferListHead");
+        if (!this->BufferListHead) 
         {
             std::cout << "Create BufferList." << std::endl;
 
@@ -98,7 +102,7 @@ struct BufferMonitor : public ModulePass
                 *module,                                                        // Module
                 PointerType::get(BufferNodeTy, 0),                              // Type
                 false,                                                          // isConstant
-                GlobalVariable::PrivateLinkage,                                 // Use private linkage
+                GlobalVariable::ExternalLinkage,                                // Make it available to all modules
                 ConstantPointerNull::get(PointerType::get(BufferNodeTy, 0)),    // Initializer
                 "BufferListHead"                                                // Name
             );
@@ -127,6 +131,20 @@ struct BufferMonitor : public ModulePass
             printfFunction = Function::Create(printfFunctionType, Function::ExternalLinkage, "printf", module);
         }
 
+        // Create Global Variable for file pointer
+        this->globalFilePtr = module->getGlobalVariable("globalFilePtr");
+        if (!this->globalFilePtr)
+        {
+            this->globalFilePtr = new GlobalVariable(
+                *module,
+                Type::getInt8PtrTy(context),
+                false,
+                GlobalVariable::ExternalLinkage,
+                Constant::getNullValue(Type::getInt8PtrTy(context)),
+                "globalFilePtr"
+            );
+        }
+
         // Get or insert fopen function for file IO
         FunctionType* FT = FunctionType::get(Type::getInt8PtrTy(context), { Type::getInt8PtrTy(context), Type::getInt8PtrTy(context) }, false);
         FunctionCallee fopenFuncCallee = module->getOrInsertFunction("fopen", FT);
@@ -141,6 +159,9 @@ struct BufferMonitor : public ModulePass
         filename = builder->CreateGlobalStringPtr("output.txt");
         mode = builder->CreateGlobalStringPtr("w");
         file_ptr = builder->CreateCall(fopenFunc, {filename, mode});
+
+        // Store the file pointer in the global variable
+        builder->CreateStore(file_ptr, globalFilePtr);
 
         // Get or insert the malloc function
         mallocFunc = module->getFunction("malloc");
@@ -259,7 +280,7 @@ struct BufferMonitor : public ModulePass
         
         // Exit block: If buffer not found, return -1
         this->builder->SetInsertPoint(exitBlock);
-        Value* notFoundValue = ConstantInt::get(Type::getInt64Ty(context), 0, true);
+        Value* notFoundValue = ConstantInt::get(Type::getInt64Ty(context), -1, true);
         this->builder->CreateRet(notFoundValue);
 
         return getBufferSizeFunction;
@@ -372,20 +393,70 @@ struct BufferMonitor : public ModulePass
         builder->CreateStore(currentHead, builder->CreateStructGEP(BufferNodeTy, newNode, 2));    // Set next of the new node to previous head           
     }
 
+    bool IsMultiDimensionalArrayAccess(GetElementPtrInst *gep) 
+    {
+        if(!gep) 
+            return false;
+
+        // Get base pointer of the buffer
+        Value* basePtr = gep->getPointerOperand();
+
+        // Check if the base pointer is a static array
+        if (AllocaInst* arrayType = dyn_cast<AllocaInst>(basePtr)) 
+        {
+            std::cout << "Is multidimensional" << std::endl;
+        }
+
+        return false;
+    }
+
     virtual bool runOnModule(Module& M)
     {
         init(M);
 
         LLVMContext& context = M.getContext();
 
+        this->builder->SetInsertPoint(&mainFunction->getEntryBlock().front());
+
+        // Get buffers that are allocated globally and store them in the linked list
+        /*
+        for (auto& global : M.globals()) 
+        {
+            errs() << "Working on global: " << global.getName() << "\n";
+
+            GlobalVariable* globalVariable = &global;
+
+            // Check if the global variable is an array
+            if (ArrayType* arrayType = dyn_cast<ArrayType>(globalVariable->getValueType())) 
+            {
+                errs() << "Global is a buffer: " << global.getName() << "\n";
+
+                // Get number of elements in the array
+                uint64_t arraySize = arrayType->getNumElements();  
+                // Convert size to LLVM Value* for inserting into the linked list
+                Value* bufferSizeValue = ConstantInt::get(Type::getInt64Ty(context), arraySize);
+                
+                // Cast the global variable's address to i8*
+                Value* bufferAddressi8 = globalVariable;
+                if (globalVariable->getType() != Type::getInt8PtrTy(context)) 
+                {
+                    bufferAddressi8 = builder->CreateBitCast(globalVariable, Type::getInt8PtrTy(context));
+                }
+
+                // Insert global buffer to linked list
+                InsertBufferToList(bufferAddressi8, bufferSizeValue);
+            }
+        }
+        */
+
         // Iterate over all functions in the module
         for (auto& F : M)
         {
             // Functions to be skipped
-            if (skipFunctions.find(&F) != skipFunctions.end())
+            if (this->skipFunctions.find(&F) != this->skipFunctions.end())
                 continue;
 
-            // Process each function
+            // Process each function of the module
             procesFunction(F);
         }
 
@@ -401,14 +472,16 @@ struct BufferMonitor : public ModulePass
         fcloseArgs.push_back(PointerType::getUnqual(Type::getInt8Ty(context))); // FILE* argument
         FunctionType* fcloseType = FunctionType::get(Type::getInt32Ty(context), fcloseArgs, false); 
         FunctionCallee fcloseFunc = module->getOrInsertFunction("fclose", fcloseType);
-        builder->CreateCall(fcloseFunc, {file_ptr});
+        // Load the file pointer from the global variable
+        Value *loadedFilePtr = builder->CreateLoad(globalFilePtr->getType()->getPointerElementType(), globalFilePtr);
+        builder->CreateCall(fcloseFunc, {loadedFilePtr});
 
         return true;
     }
 
     bool procesFunction(Function& F)
     {
-        std::cout << "Pass on " << F.getName().str() << std::endl;
+        std::cout << "Pass on function: " << F.getName().str() << std::endl;
 
         LLVMContext& context = F.getContext();
 
@@ -428,14 +501,12 @@ struct BufferMonitor : public ModulePass
                 // Check if the allocated type is an array
                 if (ArrayType* arrayType = dyn_cast<ArrayType>(allocaInst->getAllocatedType()))
                 {
-                    // This is a static buffer allocation
                     std::cout << "Found a static allocation" << std::endl;
 
                     // Determine the size of the array
                     unsigned arraySize = arrayType->getNumElements();
                     
                     // Convert arraySize to LLVM Value* for inserting into the linked list
-                    LLVMContext& context = allocaInst->getContext();
                     Value* bufferSizeValue = ConstantInt::get(Type::getInt64Ty(context), arraySize);
 
                     // Set insert point after current instruction
@@ -444,15 +515,21 @@ struct BufferMonitor : public ModulePass
                     // Skip to next instruction
                     nextInstruction++;
 
-                    // Get the pointer to the alloca'd array
-                    Value* bufferAddress = allocaInst;
                     // Cast the pointer to the buffer to a generic i8* pointer
+                    Value* bufferAddress = allocaInst;
                     if (allocaInst->getType() != Type::getInt8PtrTy(context)) 
                     {
                         bufferAddress = builder->CreateBitCast(allocaInst, Type::getInt8PtrTy(context));
                     }
                     
                     InsertBufferToList(bufferAddress, bufferSizeValue);
+
+                    // Write size of dynamicallly allocated array to file
+                    std::string outputString = "Stack allocation of size: %d\n";
+                    Value* formatString = this->builder->CreateGlobalStringPtr(outputString, "fileFormatString", 0, module);
+                    // Load the file pointer from the global variable
+                    Value *loadedFilePtr = builder->CreateLoad(globalFilePtr->getType()->getPointerElementType(), globalFilePtr);
+                    this->builder->CreateCall(fprintfFunc, { loadedFilePtr, formatString, bufferSizeValue });
 
                     std::cout << "Allocated array of size " << arraySize << " stored in linked list" << std::endl;
                 }    
@@ -492,7 +569,9 @@ struct BufferMonitor : public ModulePass
                         // Write size of dynamicallly allocated array to file
                         std::string outputString = "Heap allocation of size: %d\n";
                         Value* formatString = builder->CreateGlobalStringPtr(outputString, "fileFormatString", 0, module);
-                        builder->CreateCall(fprintfFunc, { file_ptr, formatString, bufferSize });
+                        // Load the file pointer from the global variable
+                        Value *loadedFilePtr = builder->CreateLoad(globalFilePtr->getType()->getPointerElementType(), globalFilePtr);
+                        builder->CreateCall(fprintfFunc, { loadedFilePtr, formatString, bufferSize });
                     }
                 }
             }
@@ -502,9 +581,11 @@ struct BufferMonitor : public ModulePass
                 // This is a getelementptr instruction, a buffer is being accessed here
                 std::cout << "GetElementPtr detected" << std::endl;
 
-                Value* basePtr = gepInst->getPointerOperand();         // get base 
+                // Get base pointer of the buffer
+                Value* basePtr = gepInst->getPointerOperand();
                 
-                std::string bufferName = basePtr->getName().str();     // get buffer name
+                // Get buffer name
+                std::string bufferName = basePtr->getName().str();     
 
                 builder->SetInsertPoint(&*I);
                 
@@ -517,39 +598,50 @@ struct BufferMonitor : public ModulePass
                     // For Dynamic Buffers we get the size from the linked list
                     Value* bufferSize = nullptr;
                     std::string outputString = "Buffer access: %d of size: %d";
-                    if (AllocaInst* allocaInst = dyn_cast<AllocaInst>(basePtr))
+
+                    // Check if the base pointer is a static buffer or a dynamic buffer or a global buffer
+                    // Temporary: Skip globally defined bufers
+                    if (GlobalVariable* globalVariable = dyn_cast<GlobalVariable>(basePtr))
                     {
-                        // Static buffer being accessed
-                        std::cout << "Static buffer access" << std::endl;
-
-                        int sizeInt = 0;
-
-                        // Convert integer to LLVM Value*
-                        bufferSize = ConstantInt::get(builder->getInt32Ty(), sizeInt);
-
-                        outputString += " (static)\n";
-                    } else 
+                        // GEP is performed on a global variable
+                        errs() << "GEP on global variable: " << globalVariable->getName() << "\n";
+                        outputString += " (global)\n";
+                    }
+                    else if (AllocaInst* allocaInst = dyn_cast<AllocaInst>(basePtr))
                     {
-                        // Dynamic buffer being accessed
-                        std::cout << "Dynamic buffer access" << std::endl;
 
-                        // Cast the pointer to the buffer to a generic i8* pointer
-                        if (basePtr->getType() != Type::getInt8PtrTy(context)) 
+                        // Check if accessed array is a multi-dimensional array
+                        if(IsMultiDimensionalArrayAccess(gepInst))
                         {
-                            basePtr = builder->CreateBitCast(basePtr, Type::getInt8PtrTy(context));
+                            outputString += " (static and multidimensional)\n";
+                        }
+                        else 
+                        {
+                            outputString += " (static)\n";
                         }
 
-                        // Get the size of the buffer stored in the linked list
-                        bufferSize = builder->CreateCall(getBufferSizeFunction, { basePtr });
+                    } 
+                    else 
+                    {
                         outputString += " (dynamic)\n";
                     }
+
+                    // Cast the pointer to the buffer to a generic i8* pointer
+                    if (basePtr->getType() != Type::getInt8PtrTy(context)) 
+                    {
+                        basePtr = builder->CreateBitCast(basePtr, Type::getInt8PtrTy(context));
+                    }
+
+                    // Get the size of the buffer stored in the linked list
+                    bufferSize = builder->CreateCall(getBufferSizeFunction, { basePtr });
 
                 
                     if (indexValue->getType()->isIntegerTy())
                     {
                         // Create output string for the file
                         Value* formatString = builder->CreateGlobalStringPtr(outputString.c_str());
-                        builder->CreateCall(fprintfFunc, { file_ptr, formatString, indexValue, bufferSize });
+                        Value *loadedFilePtr = builder->CreateLoad(globalFilePtr->getType()->getPointerElementType(), globalFilePtr);
+                        builder->CreateCall(fprintfFunc, { loadedFilePtr, formatString, indexValue, bufferSize });
                     } else 
                     {
                         std::cout << "Cannot read getelementptr instruction. Index wrong format." << std::endl;

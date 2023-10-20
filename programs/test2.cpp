@@ -21,12 +21,11 @@ int main() {
     int* dynamicArray1 = new int[5];
     double* dynamicArray2 = new double[3];
 
-    // Initialize dynamic arrays
     for (int i = 0; i < 5; i++) {
-        dynamicArray1[i] = i + 6; // Some arbitrary values
+        dynamicArray1[i] = i + 6; 
     }
     for (int i = 0; i < 3; i++) {
-        dynamicArray2[i] = i + 4.4; // Some arbitrary values
+        dynamicArray2[i] = i + 4.4;
     }
 
     std::cout << "Dynamic Array 1: ";
@@ -41,7 +40,6 @@ int main() {
     }
     std::cout << std::endl;
 
-    // Clean up dynamic memory
     delete[] dynamicArray1;
     delete[] dynamicArray2;
 

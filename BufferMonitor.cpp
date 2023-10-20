@@ -432,19 +432,12 @@ struct BufferMonitor : public ModulePass
         return false;
     }
 
-
-
-    virtual bool runOnModule(Module& M)
+    void AddGlobalsToLinkedList(Module& module)
     {
-        init(M);
-
-        LLVMContext& context = M.getContext();
-
-        this->builder->SetInsertPoint(&mainFunction->getEntryBlock().front());
+        LLVMContext& context = module.getContext();
 
         // Get buffers that are allocated globally and store them in the linked list
-        /*
-        for (auto& global : M.globals()) 
+        for (auto& global : module.globals()) 
         {
             errs() << "Working on global: " << global.getName() << "\n";
 
@@ -471,7 +464,20 @@ struct BufferMonitor : public ModulePass
                 InsertBufferToList(bufferAddressi8, bufferSizeValue);
             }
         }
-        */
+    }
+
+    void ProcessBuffer()
+    {
+
+    }
+
+    virtual bool runOnModule(Module& M)
+    {
+        init(M);
+
+        LLVMContext& context = M.getContext();
+
+        this->builder->SetInsertPoint(&mainFunction->getEntryBlock().front());
 
         // Iterate over all functions in the module
         for (auto& F : M)
@@ -548,11 +554,11 @@ struct BufferMonitor : public ModulePass
                     
                     InsertBufferToList(bufferAddress, bufferSizeValue);
 
-                    // Write size of dynamicallly allocated array to file
+                    // Write size of stack-array to file
                     std::string outputString = "Stack allocation of size: %d\n";
                     Value* formatString = this->builder->CreateGlobalStringPtr(outputString, "fileFormatString", 0, module);
                     // Load the file pointer from the global variable
-                    Value *loadedFilePtr = builder->CreateLoad(globalFilePtr->getType()->getPointerElementType(), globalFilePtr);
+                    Value *loadedFilePtr = this->builder->CreateLoad(globalFilePtr->getType()->getPointerElementType(), globalFilePtr);
                     this->builder->CreateCall(fprintfFunc, { loadedFilePtr, formatString, bufferSizeValue });
 
                     std::cout << "Allocated array of size " << arraySize << " stored in linked list" << std::endl;

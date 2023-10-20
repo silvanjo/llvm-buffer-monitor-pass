@@ -393,7 +393,29 @@ struct BufferMonitor : public ModulePass
         builder->CreateStore(currentHead, builder->CreateStructGEP(BufferNodeTy, newNode, 2));    // Set next of the new node to previous head           
     }
 
-    bool IsMultiDimensionalArrayAccess(GetElementPtrInst *gep) 
+    // Returns true if the alloca instruction is a multi-dimensional array
+    bool IsMultiDimensionalArray(AllocaInst* alloca)
+    {
+        if (!alloca) 
+            return false;
+        
+        llvm::Type* allocatedType = alloca->getAllocatedType();
+            
+        // Check if the allocated type is an ArrayType
+        if (ArrayType* arrayType = dyn_cast<ArrayType>(allocatedType)) 
+        {
+            // Now, check if the element of this array itself is an ArrayType
+            if(isa<ArrayType>(arrayType->getElementType())) 
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    // Returns true if the gep instruction is performed on a multi-dimensional array
+    bool IsMultiDimensionalArray(GetElementPtrInst *gep) 
     {
         if(!gep) 
             return false;
@@ -401,14 +423,16 @@ struct BufferMonitor : public ModulePass
         // Get base pointer of the buffer
         Value* basePtr = gep->getPointerOperand();
 
-        // Check if the base pointer is a static array
-        if (AllocaInst* arrayType = dyn_cast<AllocaInst>(basePtr)) 
+        // Check if the base pointer is a stack-allocated array
+        if (AllocaInst* alloca = dyn_cast<AllocaInst>(basePtr)) 
         {
-            std::cout << "Is multidimensional" << std::endl;
+            return IsMultiDimensionalArray(alloca);
         }
 
         return false;
     }
+
+
 
     virtual bool runOnModule(Module& M)
     {
@@ -611,7 +635,7 @@ struct BufferMonitor : public ModulePass
                     {
 
                         // Check if accessed array is a multi-dimensional array
-                        if(IsMultiDimensionalArrayAccess(gepInst))
+                        if(IsMultiDimensionalArray(gepInst))
                         {
                             outputString += " (static and multidimensional)\n";
                         }

@@ -1,41 +1,40 @@
-Heap allocation of size: 40
-Buffer access: 0
-Buffer access: 1
-Buffer access: 2
-Buffer access: 3
-Buffer access: 4
-Buffer access: 5
-Buffer access: 6
-Buffer access: 7
-Buffer access: 8
-Buffer access: 9
-Buffer access: 0
-Buffer access: 1
-Buffer access: 2
-Buffer access: 3
-Buffer access: 4
-Buffer access: 5
-Buffer access: 6
-Buffer access: 7
-Buffer access: 8
-Buffer access: 9
-Buffer access: 0
-Buffer access: 1
-Buffer access: 2
-Buffer access: 3
-Buffer access: 4
-Buffer access: 5
-Buffer access: 6
-Buffer access: 7
-Buffer access: 8
-Buffer access: 9
-Buffer access: 0
-Buffer access: 1
-Buffer access: 2
-Buffer access: 3
-Buffer access: 4
-Buffer access: 5
-Buffer access: 6
-Buffer access: 7
-Buffer access: 8
-Buffer access: 9
+Stack allocation of size: 20
+Heap allocation of size: 20
+Buffer access 0x5e9b50: 0 of size: 20
+Buffer access 0x5e9b50: 4 of size: 20
+Buffer access 0x5e9b50: 8 of size: 20
+Buffer access 0x5e9b50: 12 of size: 20
+Buffer access 0x5e9b50: 16 of size: 20
+Buffer access 0x7fffb84f57a0: 0 of size: 20
+Buffer access 0x7fffb84f57a0: 0 of size: 20
+Buffer access 0x7fffb84f57a0: 0 of size: 20
+Buffer access 0x7fffb84f57a0: 4 of size: 20
+Buffer access 0x7fffb84f57a0: 0 of size: 20
+Buffer access 0x7fffb84f57a0: 8 of size: 20
+Buffer access 0x7fffb84f57a0: 0 of size: 20
+Buffer access 0x7fffb84f57a0: 12 of size: 20
+Buffer access 0x7fffb84f57a0: 0 of size: 20
+Buffer access 0x7fffb84f57a0: 16 of size: 20
+Buffer access 0x5e9b50: 0 of size: 20
+Buffer access 0x5e9b50: 4 of size: 20
+Buffer access 0x5e9b50: 8 of size: 20
+Buffer access 0x5e9b50: 12 of size: 20
+Buffer access 0x5e9b50: 16 of size: 20
+Buffer access 0x7fffb84f57a0: 0 of size: 20
+Buffer access 0x7fffb84f57a0: 8 of size: 20
+Buffer access 0x5e9b50: 12 of size: 20
+Buffer access 0x7fffb84f57a0: 0 of size: 20
+Buffer access 0x7fffb84f57a0: 0 of size: 20
+Buffer access 0x7fffb84f57a0: 0 of size: 20
+Buffer access 0x7fffb84f57a0: 4 of size: 20
+Buffer access 0x7fffb84f57a0: 0 of size: 20
+Buffer access 0x7fffb84f57a0: 8 of size: 20
+Buffer access 0x7fffb84f57a0: 0 of size: 20
+Buffer access 0x7fffb84f57a0: 12 of size: 20
+Buffer access 0x7fffb84f57a0: 0 of size: 20
+Buffer access 0x7fffb84f57a0: 16 of size: 20
+Buffer access 0x5e9b50: 0 of size: 20
+Buffer access 0x5e9b50: 4 of size: 20
+Buffer access 0x5e9b50: 8 of size: 20
+Buffer access 0x5e9b50: 12 of size: 20
+Buffer access 0x5e9b50: 16 of size: 20

@@ -468,7 +468,13 @@ struct BufferMonitor : public ModulePass
 
     void DetermineBaseTypeOfArray()
     {
+        // TODO
+    }
 
+    bool IsStruct()
+    {
+        // TODO
+        return false;
     }
 
     virtual bool runOnModule(Module& M)
@@ -658,8 +664,7 @@ struct BufferMonitor : public ModulePass
                 {
                     // getelementptr instruction has two index values
                     // For arrays with one dimension the first is always zero
-                    // if (!isMultiDimensionalArray && iteration == 0) 
-                    if (iteration == 0)
+                    if (!isMultiDimensionalArray && iteration == 0) 
                     {
                         // Skip the first iteration if the array is multi-dimensional
                         // continue;
@@ -670,32 +675,7 @@ struct BufferMonitor : public ModulePass
                     Value* accessedBytes = builder->CreateMul(indexValue, ConstantInt::get(Type::getInt64Ty(context), elementSizeInBytes));
 
                     Value* bufferSize = nullptr;
-                    std::string outputString = "Buffer access %p: %d of size: %d";
-
-                    // Check if the base pointer is a static buffer or a dynamic buffer or a global buffer
-                    if (GlobalVariable* globalVariable = dyn_cast<GlobalVariable>(basePtr))
-                    {
-                        // GEP is performed on a global variable
-                        errs() << "GEP on global variable: " << globalVariable->getName() << "\n";
-                        outputString += " (global)\n";
-                    }
-                    else if (AllocaInst* allocaInst = dyn_cast<AllocaInst>(basePtr))
-                    {
-                        // Check if accessed array is a multi-dimensional
-                        if(isMultiDimensionalArray)
-                        {
-                            outputString += " (static and multidimensional)\n";
-                        }
-                        else 
-                        {
-                            outputString += " (static)\n";
-                        }
-                    } 
-                    else 
-                    {
-                        outputString += " (dynamic)\n";
-                    }
-
+                    
                     // Cast the pointer to the buffer to a generic i8* pointer
                     if (basePtr->getType() != Type::getInt8PtrTy(context)) 
                     {
@@ -706,6 +686,7 @@ struct BufferMonitor : public ModulePass
                     bufferSize = builder->CreateCall(getBufferSizeFunction, { basePtr });
 
                     // Create output string for the file
+                    std::string outputString = "Buffer access %p: %d of size: %d\n";
                     Value* formatString = builder->CreateGlobalStringPtr(outputString.c_str());
                     Value *loadedFilePtr = builder->CreateLoad(globalFilePtr->getType()->getPointerElementType(), globalFilePtr);
                     builder->CreateCall(fprintfFunc, { loadedFilePtr, formatString, basePtr, accessedBytes, bufferSize });

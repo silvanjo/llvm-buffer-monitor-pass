@@ -3,7 +3,7 @@
 int main() {
     // Static arrays
     int staticArray1[5] = {1, 2, 3, 4, 5};
-    double staticArray3[6] = {1.1, 2.2, 3.3, 4.4, 5.5};
+    double staticArray3[6] = {1.1, 2.2, 3.3, 4.4, 5.5, 6.6};
     double staticArray2[4] = {1.1, 2.2, 3.3};
 
     std::cout << "Static Array 1: ";

@@ -382,15 +382,15 @@ struct BufferMonitor : public ModulePass
         // Cast the return value of malloc to BufferNodeTy
         newNode = builder->CreateBitCast(newNode, PointerType::getUnqual(BufferNodeTy));
 
-        // INitialize the new node
+        // Initialize the new node
         builder->CreateStore(bufferAddress, builder->CreateStructGEP(BufferNodeTy, newNode, 0));  // Store address
         builder->CreateStore(bufferSize, builder->CreateStructGEP(BufferNodeTy, newNode, 1));     // Store size
         builder->CreateStore(nullPtr, builder->CreateStructGEP(BufferNodeTy, newNode, 2));        // Set next to nullptr
 
         // Insert the new node at the beginning of the linked list
         Value* currentHead = builder->CreateLoad(BufferListHead->getType()->getPointerElementType(), BufferListHead, "currentHead");
-        builder->CreateStore(newNode, BufferListHead);                                           // Update the head of the list to point to the new node
-        builder->CreateStore(currentHead, builder->CreateStructGEP(BufferNodeTy, newNode, 2));    // Set next of the new node to previous head           
+        builder->CreateStore(newNode, BufferListHead);                                              // Update the head of the list to point to the new node
+        builder->CreateStore(currentHead, builder->CreateStructGEP(BufferNodeTy, newNode, 2));      // Set next node of the new node to previous head           
     }
 
     // Returns true if the alloca instruction is a multi-dimensional array
@@ -532,6 +532,7 @@ struct BufferMonitor : public ModulePass
                 if (ArrayType* arrayType = dyn_cast<ArrayType>(allocaInst->getAllocatedType()))
                 {
                     std::cout << "Found a static allocation" << std::endl;
+                    allocaInst->dump();
 
                     // Determine the size of the array in bytes
                     unsigned arraySize = arrayType->getNumElements();
@@ -545,7 +546,7 @@ struct BufferMonitor : public ModulePass
                     this->builder->SetInsertPoint(I->getNextNode());
 
                     // Skip to next instruction
-                    nextInstruction++;
+                    // nextInstruction++;
 
                     // Cast the pointer to the buffer to a generic i8* pointer
                     Value* bufferAddress = allocaInst;
@@ -590,7 +591,7 @@ struct BufferMonitor : public ModulePass
                         builder->SetInsertPoint(I->getNextNode());
 
                         // Skip to next instruction
-                        nextInstruction++;
+                        // nextInstruction++;
 
                         Value* bufferAddress = callInst;                    // get address of allocated buffer
                         Value* bufferSize = callInst->getArgOperand(0);     // get size of allocated buffer
@@ -657,10 +658,11 @@ struct BufferMonitor : public ModulePass
                 {
                     // getelementptr instruction has two index values
                     // For arrays with one dimension the first is always zero
-                    if (!isMultiDimensionalArray && iteration == 0) 
+                    // if (!isMultiDimensionalArray && iteration == 0) 
+                    if (iteration == 0)
                     {
                         // Skip the first iteration if the array is multi-dimensional
-                        continue;
+                        // continue;
                     }
 
                     // Determine buffer size in bytes

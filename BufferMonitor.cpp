@@ -466,7 +466,7 @@ struct BufferMonitor : public ModulePass
         }
     }
 
-    void ProcessBuffer()
+    void InsertStaticBufferToLinkedList(AllocaInst* allocaInst)
     {
 
     }
@@ -533,11 +533,13 @@ struct BufferMonitor : public ModulePass
                 {
                     std::cout << "Found a static allocation" << std::endl;
 
-                    // Determine the size of the array
+                    // Determine the size of the array in bytes
                     unsigned arraySize = arrayType->getNumElements();
+                    unsigned elementSizeInBytes = arrayType->getElementType()->getPrimitiveSizeInBits() / 8;
+                    unsigned arraySizeInBytes = arraySize * elementSizeInBytes;
                     
                     // Convert arraySize to LLVM Value* for inserting into the linked list
-                    Value* bufferSizeValue = ConstantInt::get(Type::getInt64Ty(context), arraySize);
+                    Value* bufferSizeValue = ConstantInt::get(Type::getInt64Ty(context), arraySizeInBytes);
 
                     // Set insert point after current instruction
                     this->builder->SetInsertPoint(I->getNextNode());
@@ -611,26 +613,49 @@ struct BufferMonitor : public ModulePass
                 // This is a getelementptr instruction, a buffer is being accessed here
                 std::cout << "GetElementPtr detected" << std::endl;
 
+                builder->SetInsertPoint(&*I);
+
                 // Get base pointer of the buffer
                 Value* basePtr = gepInst->getPointerOperand();
                 
                 // Get buffer name
                 std::string bufferName = basePtr->getName().str();     
 
-                builder->SetInsertPoint(&*I);
+                // Get type of the base pointer to determine the size of the elements
+                Type* baseType = basePtr->getType();
+                unsigned elementSizeInBytes = 0;
+                if (PointerType* ptrType = dyn_cast<PointerType>(baseType)) 
+                {
+                    // Get type of the base pointer
+                    baseType = ptrType->getPointerElementType();
+                    
+                    // Print type of the base pointer
+                    baseType->print(errs());
+                    errs() << "\n"; 
+                    
+                    if (ArrayType* arrayType = dyn_cast<ArrayType>(baseType))
+                    {
+                        // It's an array. Get its element type and then its size.
+                        Type* elementType = arrayType->getElementType();
+                        elementSizeInBytes = elementType->getPrimitiveSizeInBits() / 8;
+                    }
+                    else
+                    {
+                        // It's a primitive type or some other type. Get its size.
+                        elementSizeInBytes = baseType->getPrimitiveSizeInBits() / 8;
+                    }
+                }
                 
                 for (auto it = gepInst->idx_begin(); it != gepInst->idx_end(); it++) 
                 {
+                    // Determine buffer size in bytes
                     Value* indexValue = it->get();
+                    Value* accessedBytes = builder->CreateMul(indexValue, ConstantInt::get(Type::getInt64Ty(context), elementSizeInBytes));
 
-                    // Get size of buffer
-                    // For Static Buffers we get the size from the bufferMap
-                    // For Dynamic Buffers we get the size from the linked list
                     Value* bufferSize = nullptr;
                     std::string outputString = "Buffer access: %d of size: %d";
 
                     // Check if the base pointer is a static buffer or a dynamic buffer or a global buffer
-                    // Temporary: Skip globally defined bufers
                     if (GlobalVariable* globalVariable = dyn_cast<GlobalVariable>(basePtr))
                     {
                         // GEP is performed on a global variable
@@ -639,8 +664,7 @@ struct BufferMonitor : public ModulePass
                     }
                     else if (AllocaInst* allocaInst = dyn_cast<AllocaInst>(basePtr))
                     {
-
-                        // Check if accessed array is a multi-dimensional array
+                        // Check if accessed array is a multi-dimensional
                         if(IsMultiDimensionalArray(gepInst))
                         {
                             outputString += " (static and multidimensional)\n";
@@ -649,7 +673,6 @@ struct BufferMonitor : public ModulePass
                         {
                             outputString += " (static)\n";
                         }
-
                     } 
                     else 
                     {
@@ -665,17 +688,10 @@ struct BufferMonitor : public ModulePass
                     // Get the size of the buffer stored in the linked list
                     bufferSize = builder->CreateCall(getBufferSizeFunction, { basePtr });
 
-                
-                    if (indexValue->getType()->isIntegerTy())
-                    {
-                        // Create output string for the file
-                        Value* formatString = builder->CreateGlobalStringPtr(outputString.c_str());
-                        Value *loadedFilePtr = builder->CreateLoad(globalFilePtr->getType()->getPointerElementType(), globalFilePtr);
-                        builder->CreateCall(fprintfFunc, { loadedFilePtr, formatString, indexValue, bufferSize });
-                    } else 
-                    {
-                        std::cout << "Cannot read getelementptr instruction. Index wrong format." << std::endl;
-                    }
+                    // Create output string for the file
+                    Value* formatString = builder->CreateGlobalStringPtr(outputString.c_str());
+                    Value *loadedFilePtr = builder->CreateLoad(globalFilePtr->getType()->getPointerElementType(), globalFilePtr);
+                    builder->CreateCall(fprintfFunc, { loadedFilePtr, formatString, accessedBytes, bufferSize });
                 }
 
             } 
@@ -691,4 +707,3 @@ struct BufferMonitor : public ModulePass
 
 char BufferMonitor::ID = 0;
 static RegisterPass<BufferMonitor> X("buffer_monitor", "Monitors buffer accesses");
-

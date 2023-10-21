@@ -369,7 +369,7 @@ struct BufferMonitor : public ModulePass
         // Get data layout of the module to exactly determine the size of the BufferNode struct
         const DataLayout& DL = module->getDataLayout();
 
-        // Get mull pointer of type BufferNodeTy
+        // Get null pointer of type BufferNodeTy
         Value* nullPtr = ConstantPointerNull::get(PointerType::get(BufferNodeTy, 0));       
 
         // Determine size of BufferNode struct for malloc instruction
@@ -466,7 +466,7 @@ struct BufferMonitor : public ModulePass
         }
     }
 
-    void InsertStaticBufferToLinkedList(AllocaInst* allocaInst)
+    void DetermineBaseTypeOfArray()
     {
 
     }
@@ -612,6 +612,7 @@ struct BufferMonitor : public ModulePass
             {
                 // This is a getelementptr instruction, a buffer is being accessed here
                 std::cout << "GetElementPtr detected" << std::endl;
+                gepInst->dump();
 
                 builder->SetInsertPoint(&*I);
 
@@ -644,16 +645,30 @@ struct BufferMonitor : public ModulePass
                         // It's a primitive type or some other type. Get its size.
                         elementSizeInBytes = baseType->getPrimitiveSizeInBits() / 8;
                     }
+
+                    std::cout << "Element size: " << elementSizeInBytes << std::endl;
                 }
                 
-                for (auto it = gepInst->idx_begin(); it != gepInst->idx_end(); it++) 
+                // Check if the gep instruction is performed on a multi-dimensional array
+                bool isMultiDimensionalArray = IsMultiDimensionalArray(gepInst);
+
+                int iteration = 0;
+                for (auto it = gepInst->idx_begin(); it != gepInst->idx_end(); it++, iteration++) 
                 {
+                    // getelementptr instruction has two index values
+                    // For arrays with one dimension the first is always zero
+                    if (!isMultiDimensionalArray && iteration == 0) 
+                    {
+                        // Skip the first iteration if the array is multi-dimensional
+                        continue;
+                    }
+
                     // Determine buffer size in bytes
                     Value* indexValue = it->get();
                     Value* accessedBytes = builder->CreateMul(indexValue, ConstantInt::get(Type::getInt64Ty(context), elementSizeInBytes));
 
                     Value* bufferSize = nullptr;
-                    std::string outputString = "Buffer access: %d of size: %d";
+                    std::string outputString = "Buffer access %p: %d of size: %d";
 
                     // Check if the base pointer is a static buffer or a dynamic buffer or a global buffer
                     if (GlobalVariable* globalVariable = dyn_cast<GlobalVariable>(basePtr))
@@ -665,7 +680,7 @@ struct BufferMonitor : public ModulePass
                     else if (AllocaInst* allocaInst = dyn_cast<AllocaInst>(basePtr))
                     {
                         // Check if accessed array is a multi-dimensional
-                        if(IsMultiDimensionalArray(gepInst))
+                        if(isMultiDimensionalArray)
                         {
                             outputString += " (static and multidimensional)\n";
                         }
@@ -691,7 +706,7 @@ struct BufferMonitor : public ModulePass
                     // Create output string for the file
                     Value* formatString = builder->CreateGlobalStringPtr(outputString.c_str());
                     Value *loadedFilePtr = builder->CreateLoad(globalFilePtr->getType()->getPointerElementType(), globalFilePtr);
-                    builder->CreateCall(fprintfFunc, { loadedFilePtr, formatString, accessedBytes, bufferSize });
+                    builder->CreateCall(fprintfFunc, { loadedFilePtr, formatString, basePtr, accessedBytes, bufferSize });
                 }
 
             } 

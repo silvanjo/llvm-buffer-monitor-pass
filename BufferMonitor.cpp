@@ -65,8 +65,9 @@ struct BufferMonitor : public ModulePass
     Function* printfFunction;
 
     // Custom LLVM functions
-    Function* printBufferListFunction;
+    Function* writeToFileFunction;
     Function* getBufferSizeFunction;
+    Function* printBufferListFunction;
 
     Value* mode;
     Value* filename;
@@ -120,7 +121,6 @@ struct BufferMonitor : public ModulePass
                 "BufferListHead"                                                // Name
             );
         }
-
 
         // Get main function
         mainFunction = module->getFunction("main");
@@ -209,6 +209,19 @@ struct BufferMonitor : public ModulePass
             #endif
         }
 
+        // Create the writeToFile function
+        this->writeToFileFunction = CreateWriteToFileFunction();
+
+        if (verifyFunction(*this->writeToFileFunction, &llvm::errs())) 
+        {
+            DEBUG_PRINT_ERROR("writeToFileFunction Function verification failed after transformations!");
+            #ifdef DEBUG
+                this->writeToFileFunction->dump();
+            #endif
+        }
+
+        // Add functions to skip
+        skipFunctions.insert(this->writeToFileFunction);
         skipFunctions.insert(this->getBufferSizeFunction);
         skipFunctions.insert(this->printBufferListFunction);
 
@@ -221,15 +234,15 @@ struct BufferMonitor : public ModulePass
 
         // Define the function signature
         // Function type: i64(i8*)
-        FunctionType* functionType = FunctionType::get(Type::getInt64Ty(context), 
-                                                Type::getInt8PtrTy(context), 
-                                                false);
+        FunctionType* functionType = FunctionType::get( Type::getInt64Ty(context), 
+                                                        Type::getInt8PtrTy(context), 
+                                                        false);
 
         // Create the function
-        Function* getBufferSizeFunction = Function::Create(functionType, 
-                                                    Function::ExternalLinkage, 
-                                                    "getBufferSize", 
-                                                    module);
+        Function* getBufferSizeFunction = Function::Create( functionType, 
+                                                            Function::ExternalLinkage, 
+                                                            "getBufferSize", 
+                                                            module);
 
         // Set function argument name
         getBufferSizeFunction->arg_begin()->setName("bufferAddress");
@@ -303,13 +316,93 @@ struct BufferMonitor : public ModulePass
         return getBufferSizeFunction;
     }
 
+    Function* CreateWriteToFileFunction()
+    {
+        LLVMContext& context = this->module->getContext();
+
+        std::vector<Type*> paramTypes = {
+            Type::getInt8PtrTy(context),  // pointer to int8 (basePtr)
+            Type::getInt64Ty(context),    // int64 (accessedBytes)
+            Type::getInt64Ty(context)     // another int64 (bufferSize)
+        };
+
+        FunctionType* writeToFileFunctionType = FunctionType::get(Type::getVoidTy(context), 
+                                                                    paramTypes, 
+                                                                    false);
+
+        Function* writeToFileFunction = Function::Create(writeToFileFunctionType, 
+                                                            Function::ExternalLinkage, 
+                                                            "writeToFile", 
+                                                            module);
+
+        BasicBlock* entry = BasicBlock::Create(context, "entry", writeToFileFunction);
+
+        builder->SetInsertPoint(entry);
+
+        // Get values from arguments
+        Value* basePtr = writeToFileFunction->arg_begin();          // Get base pointer
+        Value* accessedByte = writeToFileFunction->arg_begin() + 1; // Get accessed byte
+        Value* bufferSize = writeToFileFunction->arg_begin() + 2;   // Get buffer size
+
+        // Check if the buffer size is known
+        // If not, don't write buffer access to file
+
+        #ifdef DEBUG
+    
+            Value* bufferSize64 = this->builder->CreateIntCast(bufferSize, Type::getInt64Ty(context),  true);
+
+            // Compare bufferSize with 0
+            Value* conditionSGE = this->builder->CreateICmpSGE(bufferSize64, ConstantInt::get(Type::getInt64Ty(context), 0), "BufferSizeSGEZero");
+
+            // Create a basic block for the printf call
+            BasicBlock* thenBlockSGE = BasicBlock::Create(context, "then_buffer_found", writeToFileFunction);
+            // Create a basic block for continuation after printf
+            BasicBlock* continueBlockSGE = BasicBlock::Create(context, "continue_buffer_not_found", writeToFileFunction);
+
+            // Create a conditional branch
+            this->builder->CreateCondBr(conditionSGE, thenBlockSGE, continueBlockSGE);
+
+            // Insert printf inside thenBlock
+            this->builder->SetInsertPoint(thenBlockSGE);
+        
+            // Create output string for the file
+            std::string outputString = "Buffer access %p: %d of size: %d\n";
+            Value* formatString = this->builder->CreateGlobalStringPtr(outputString.c_str());
+            Value* loadedFilePtr = this->builder->CreateLoad(globalFilePtr->getType()->getPointerElementType(), globalFilePtr);
+            this->builder->CreateCall(fprintfFunc, { loadedFilePtr, formatString, basePtr, accessedByte, bufferSize });
+        
+            // Jump to the continue block after printf
+            this->builder->CreateBr(continueBlockSGE);
+
+            // Set the insert point back to the continue block
+            this->builder->SetInsertPoint(continueBlockSGE);
+    
+    #else
+
+        // Create output string for the file
+        std::string outputString = "Buffer access %p: %d of size: %d\n";
+        Value* formatString = this->builder->CreateGlobalStringPtr(outputString.c_str());
+        Value* loadedFilePtr = this->builder->CreateLoad(globalFilePtr->getType()->getPointerElementType(), globalFilePtr);
+        builder->CreateCall(fprintfFunc, { loadedFilePtr, formatString, basePtr, accessedByte, bufferSize });
+
+    #endif
+
+        builder->CreateRetVoid();
+
+        return writeToFileFunction;
+    }
+
     Function* CreatePrintBufferListFunction()
     {
         LLVMContext& context = this->module->getContext();
 
         // Create the printBufferList function
         FunctionType* printBufferListType = FunctionType::get(Type::getVoidTy(context), false);
-        Function* printBufferList = Function::Create(printBufferListType, Function::ExternalLinkage, "printBufferList", module);
+        
+        Function* printBufferList = Function::Create(printBufferListType, 
+                                                        Function::ExternalLinkage, 
+                                                        "printBufferList", 
+                                                        this->module);
 
         // Create the entry basic block
         BasicBlock *entry = BasicBlock::Create(context, "entry", printBufferList);
@@ -691,32 +784,33 @@ struct BufferMonitor : public ModulePass
                     // For arrays with one dimension the first is always zero
                     if (!isMultiDimensionalArray && iteration == 0) 
                     {
-                        // Skip the first iteration if the array is multi-dimensional
+                        // Skip the first iteration if the array is not multi-dimensional
                         // continue;
                     }
 
-                    // Determine buffer size in bytes
+                    // Determine accessed byte
                     Value* indexValue = it->get();
                     Value* accessedBytes = builder->CreateMul(indexValue, ConstantInt::get(Type::getInt64Ty(context), elementSizeInBytes));
 
-                    Value* bufferSize = nullptr;
-                    
+                    // Ensure accessedBytes is of type i64
+                    if (accessedBytes->getType() != Type::getInt64Ty(context)) 
+                    {
+                        accessedBytes = builder->CreateSExt(accessedBytes, Type::getInt64Ty(context));  // Use SExt for signed values
+                    }
+
                     // Cast the pointer to the buffer to a generic i8* pointer
-                    if (basePtr->getType() != Type::getInt8PtrTy(context)) 
+                    if (basePtr->getType() != Type::getInt8PtrTy(context))
                     {
                         basePtr = builder->CreateBitCast(basePtr, Type::getInt8PtrTy(context));
                     }
 
                     // Get the size of the buffer stored in the linked list
-                    bufferSize = builder->CreateCall(getBufferSizeFunction, { basePtr });
+                    Value* bufferSize = builder->CreateCall(getBufferSizeFunction, { basePtr });
 
-                    // Create output string for the file
-                    std::string outputString = "Buffer access %p: %d of size: %d\n";
-                    Value* formatString = builder->CreateGlobalStringPtr(outputString.c_str());
-                    Value *loadedFilePtr = builder->CreateLoad(globalFilePtr->getType()->getPointerElementType(), globalFilePtr);
-                    builder->CreateCall(fprintfFunc, { loadedFilePtr, formatString, basePtr, accessedBytes, bufferSize });
+                    // TODO: Write to file
+                    builder->CreateCall(writeToFileFunction, { basePtr, accessedBytes, bufferSize });
+                
                 }
-
             } 
 
             I = nextInstruction;

@@ -8,8 +8,10 @@ BufferMonitor is an LLVM pass designed to monitor buffer accesses and report pot
 
 Before running the pass, LLVM and Clang version 14 must be installed:
 
+```
 sudo apt-get update
 sudo apt-get install llvm-14 clang-14
+```
 
 ## Installation
 

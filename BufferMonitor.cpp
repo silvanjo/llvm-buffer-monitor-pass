@@ -519,8 +519,10 @@ struct BufferMonitor : public ModulePass
         BasicBlock &LastBlock = mainFunction->back();   
         builder->SetInsertPoint(LastBlock.getTerminator());
 
-        // Print the linked list containing all buffers
-        builder->CreateCall(this->printBufferListFunction);
+        #ifdef DEBUG
+            // Print the linked list containing all buffers
+            builder->CreateCall(this->printBufferListFunction);
+        #endif
 
         // Close file
         std::vector<Type*> fcloseArgs;

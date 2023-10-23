@@ -16,6 +16,19 @@
 #include <string>
 #include <iostream>
 
+// Print on console only when in debug mode
+#ifdef DEBUG
+    #define DEBUG_PRINT(x)       std::cout << x << std::endl
+    #define DEBUG_PRINT_INFO(x)  std::cout << "\033[34m" << x << "\033[0m" << std::endl  // Text color blue
+    #define DEBUG_PRINT_WARN(x)  std::cout << "\033[33m" << x << "\033[0m" << std::endl  // Text color yellow
+    #define DEBUG_PRINT_ERROR(x) std::cout << "\033[31m" << x << "\033[0m" << std::endl  // Text color red
+#else
+    #define DEBUG_PRINT(x)
+    #define DEBUG_PRINT_INFO(x)
+    #define DEBUG_PRINT_WARN(x)
+    #define DEBUG_PRINT_ERROR(x)
+#endif
+
 using namespace llvm;
 
 namespace 
@@ -51,7 +64,7 @@ struct BufferMonitor : public ModulePass
     Function* mainFunction;
     Function* printfFunction;
 
-    // Custom functions
+    // Custom LLVM functions
     Function* printBufferListFunction;
     Function* getBufferSizeFunction;
 
@@ -95,7 +108,7 @@ struct BufferMonitor : public ModulePass
         this->BufferListHead = module->getGlobalVariable("BufferListHead");
         if (!this->BufferListHead) 
         {
-            std::cout << "Create BufferList." << std::endl;
+            DEBUG_PRINT_INFO("Create BufferList");
 
             // Create the head of the linked list
             BufferListHead = new GlobalVariable(
@@ -113,7 +126,7 @@ struct BufferMonitor : public ModulePass
         mainFunction = module->getFunction("main");
         if (!mainFunction) 
         {
-            std::cout << "No main function found" << std::endl;
+            DEBUG_PRINT_ERROR("No main function found");
             return false;
         }
 
@@ -178,8 +191,10 @@ struct BufferMonitor : public ModulePass
         // Check if function is correct after transformations
         if (verifyFunction(*this->getBufferSizeFunction, &llvm::errs())) 
         {
-            llvm::errs() << "getBufferSizeFunction Function verification failed after transformations!\n";
-            this->getBufferSizeFunction->dump();
+            DEBUG_PRINT_ERROR("getBufferSizeFunction Function verification failed after transformations!");
+            #ifdef DEBUG
+                this->getBufferSizeFunction->dump();
+            #endif
         }
 
         // Create the printBufferList function
@@ -188,8 +203,10 @@ struct BufferMonitor : public ModulePass
         // Check if function is correct after transformations
         if (verifyFunction(*this->printBufferListFunction, &llvm::errs())) 
         {
-            llvm::errs() << "printBufferListFunction Function verification failed after transformations!\n";
-            this->printBufferListFunction->dump();
+            DEBUG_PRINT_ERROR("printBufferListFunction Function verification failed after transformations!");
+            #ifdef DEBUG
+                this->printBufferListFunction->dump();
+            #endif
         }
 
         skipFunctions.insert(this->getBufferSizeFunction);
@@ -439,14 +456,14 @@ struct BufferMonitor : public ModulePass
         // Get buffers that are allocated globally and store them in the linked list
         for (auto& global : module.globals()) 
         {
-            errs() << "Working on global: " << global.getName() << "\n";
+            DEBUG_PRINT_INFO("Working on global: " << global.getName().str());
 
             GlobalVariable* globalVariable = &global;
 
             // Check if the global variable is an array
             if (ArrayType* arrayType = dyn_cast<ArrayType>(globalVariable->getValueType())) 
             {
-                errs() << "Global is a buffer: " << global.getName() << "\n";
+                DEBUG_PRINT_INFO("Global is a buffer: " << global.getName().str());
 
                 // Get number of elements in the array
                 uint64_t arraySize = arrayType->getNumElements();  
@@ -479,6 +496,8 @@ struct BufferMonitor : public ModulePass
 
     virtual bool runOnModule(Module& M)
     {
+        DEBUG_PRINT_INFO("Run pass in debug mode");
+
         init(M);
 
         LLVMContext& context = M.getContext();
@@ -517,7 +536,7 @@ struct BufferMonitor : public ModulePass
 
     bool procesFunction(Function& F)
     {
-        std::cout << "Pass on function: " << F.getName().str() << std::endl;
+        DEBUG_PRINT_INFO("Pass on function: " << F.getName().str());
 
         LLVMContext& context = F.getContext();
 
@@ -537,8 +556,10 @@ struct BufferMonitor : public ModulePass
                 // Check if the allocated type is an array
                 if (ArrayType* arrayType = dyn_cast<ArrayType>(allocaInst->getAllocatedType()))
                 {
-                    std::cout << "Found a static allocation" << std::endl;
-                    allocaInst->dump();
+                    DEBUG_PRINT("Found a static allocation");
+                    #ifdef DEBUG
+                        allocaInst->dump();
+                    #endif
 
                     // Determine the size of the array in bytes
                     unsigned arraySize = arrayType->getNumElements();
@@ -570,7 +591,7 @@ struct BufferMonitor : public ModulePass
                     Value *loadedFilePtr = this->builder->CreateLoad(globalFilePtr->getType()->getPointerElementType(), globalFilePtr);
                     this->builder->CreateCall(fprintfFunc, { loadedFilePtr, formatString, bufferSizeValue });
 
-                    std::cout << "Allocated array of size " << arraySize << " stored in linked list" << std::endl;
+                    DEBUG_PRINT("Allocated array of size " << arraySize << " stored in linked list");
                 }    
             }
             
@@ -588,7 +609,7 @@ struct BufferMonitor : public ModulePass
                     if (funcName == "malloc" || funcName.startswith("_Znwm") || funcName.startswith("_Znam"))
                     {
                         // This is a heap allocation
-                        std::cout << "Found a heap allocation" << std::endl;
+                        DEBUG_PRINT_INFO("Found a heap allocation");
 
                         // get buffer name
                         std::string dynBufferName = callInst->getName().str();   
@@ -618,8 +639,10 @@ struct BufferMonitor : public ModulePass
             if (GetElementPtrInst* gepInst = dyn_cast<GetElementPtrInst>(&*I)) 
             {
                 // This is a getelementptr instruction, a buffer is being accessed here
-                std::cout << "GetElementPtr detected" << std::endl;
-                gepInst->dump();
+                DEBUG_PRINT("Found a getelementptr instruction");
+                #ifdef DEBUG
+                    gepInst->dump();
+                #endif
 
                 builder->SetInsertPoint(&*I);
 
@@ -638,9 +661,11 @@ struct BufferMonitor : public ModulePass
                     baseType = ptrType->getPointerElementType();
                     
                     // Print type of the base pointer
-                    baseType->print(errs());
-                    errs() << "\n"; 
-                    
+                    #ifdef DEBUG
+                        baseType->dump();
+                        errs() << "\n"; 
+                    #endif
+
                     if (ArrayType* arrayType = dyn_cast<ArrayType>(baseType))
                     {
                         // It's an array. Get its element type and then its size.
@@ -652,8 +677,6 @@ struct BufferMonitor : public ModulePass
                         // It's a primitive type or some other type. Get its size.
                         elementSizeInBytes = baseType->getPrimitiveSizeInBits() / 8;
                     }
-
-                    std::cout << "Element size: " << elementSizeInBytes << std::endl;
                 }
                 
                 // Check if the gep instruction is performed on a multi-dimensional array

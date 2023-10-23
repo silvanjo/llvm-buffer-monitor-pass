@@ -12,13 +12,12 @@ OUTPUT_BITCODE_FILE="original_program.bc"
 OUTPUT_TRANSFORMED_BITCODE_FILE="transformed_program.bc"
 
 # Step 1: Compile BufferMonitor.cpp pass to shared library
-clang++ -shared -o ./shared/BufferMonitor.so `llvm-config --cxxflags` ./BufferMonitor.cpp `llvm-config --ldflags` -fPIC -lLLVM
+clang++ -DDEBUG -shared -o ./shared/BufferMonitor.so `llvm-config --cxxflags` ./BufferMonitor.cpp `llvm-config --ldflags` -fPIC -lLLVM
 
 # Step 2: Compile target program to llvm bitcode file 
 clang++ -emit-llvm -fPIE -c "$INPUT_FILE" -o ./programs/output/"${OUTPUT_BITCODE_FILE}"
 
 # Step 3: Run the pass using opt
-echo "Running the pass on $INPUT_FILE..."
 opt -enable-new-pm=0 -load ./shared/BufferMonitor.so -buffer_monitor -o "./programs/output/${OUTPUT_TRANSFORMED_BITCODE_FILE}" < ./programs/output/"$OUTPUT_BITCODE_FILE"
 
 # TODO: Generating executable from transformed bitcode file does not work currently

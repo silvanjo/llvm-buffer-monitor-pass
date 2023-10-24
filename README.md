@@ -42,5 +42,5 @@ To see additional console output when running the pass:
 The transformed output binaries a created in the program/output directory and can be run using lli:
 
 ```
-lli transformed_output.bc
+lli transformed_linked_output.bc
 ```

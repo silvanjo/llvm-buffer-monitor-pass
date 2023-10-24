@@ -345,9 +345,18 @@ struct BufferMonitor : public ModulePass
         Value* bufferSize = writeToFileFunction->arg_begin() + 2;   // Get buffer size
 
         // Check if the buffer size is known
-        // If not, don't write buffer access to file
+        // If not, don't write buffer access to file if not in debug mode
 
         #ifdef DEBUG
+
+            // Create output string for the file
+            std::string outputString = "Buffer access %p: %d of size: %d\n";
+            Value* formatString = this->builder->CreateGlobalStringPtr(outputString.c_str());
+            Value* loadedFilePtr = this->builder->CreateLoad(globalFilePtr->getType()->getPointerElementType(), globalFilePtr);
+            builder->CreateCall(fprintfFunc, { loadedFilePtr, formatString, basePtr, accessedByte, bufferSize });
+
+        #else
+
     
             Value* bufferSize64 = this->builder->CreateIntCast(bufferSize, Type::getInt64Ty(context),  true);
 
@@ -377,15 +386,7 @@ struct BufferMonitor : public ModulePass
             // Set the insert point back to the continue block
             this->builder->SetInsertPoint(continueBlockSGE);
     
-    #else
-
-        // Create output string for the file
-        std::string outputString = "Buffer access %p: %d of size: %d\n";
-        Value* formatString = this->builder->CreateGlobalStringPtr(outputString.c_str());
-        Value* loadedFilePtr = this->builder->CreateLoad(globalFilePtr->getType()->getPointerElementType(), globalFilePtr);
-        builder->CreateCall(fprintfFunc, { loadedFilePtr, formatString, basePtr, accessedByte, bufferSize });
-
-    #endif
+        #endif
 
         builder->CreateRetVoid();
 

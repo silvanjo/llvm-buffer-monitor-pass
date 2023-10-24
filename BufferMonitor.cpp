@@ -126,8 +126,7 @@ struct BufferMonitor : public ModulePass
         mainFunction = module->getFunction("main");
         if (!mainFunction) 
         {
-            DEBUG_PRINT_ERROR("No main function found");
-            return false;
+            DEBUG_PRINT_WARN("No main function found");
         }
 
         // Open the file for writing in the beginning of the main function

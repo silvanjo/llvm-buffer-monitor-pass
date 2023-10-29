@@ -9,6 +9,7 @@
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
+#include "llvm/Transforms/IPO/PassManagerBuilder.h"
 
 
 #include <map>
@@ -822,5 +823,17 @@ struct BufferMonitor : public ModulePass
 
 } // namespace
 
-char BufferMonitor::ID = 0;
-static RegisterPass<BufferMonitor> X("buffer_monitor", "Monitors buffer accesses");
+char BufferMonitor::ID = 1;
+
+static void registerAFLPass(const PassManagerBuilder &,
+                            legacy::PassManagerBase &PM) {
+
+  PM.add(new BufferMonitor());
+
+}
+
+static RegisterStandardPasses RegisterAFLPass(
+    PassManagerBuilder::EP_ModuleOptimizerEarly, registerAFLPass);
+
+static RegisterStandardPasses RegisterAFLPass0(
+    PassManagerBuilder::EP_EnabledOnOptLevel0, registerAFLPass);

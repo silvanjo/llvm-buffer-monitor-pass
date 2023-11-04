@@ -9,6 +9,8 @@
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
+#include "llvm/Transforms/IPO/PassManagerBuilder.h"
+
 
 
 #include <map>
@@ -822,5 +824,18 @@ struct BufferMonitor : public ModulePass
 
 } // namespace
 
-char BufferMonitor::ID = 0;
-static RegisterPass<BufferMonitor> X("buffer_monitor", "Monitors buffer accesses");
+char BufferMonitor::ID = 2;
+
+static void registerBufferMonitorPass(const PassManagerBuilder &,
+                                      legacy::PassManagerBase &PM) 
+{
+    PM.add(new BufferMonitor());
+}
+
+// Run BufferMonitor at the end of the optimization pipeline
+static RegisterStandardPasses RegisterBufferMonitorPass(
+    PassManagerBuilder::EP_ModuleOptimizerEarly, registerBufferMonitorPass);
+
+// Also run BufferMonitor when optimizations are turned off (-O0)
+static RegisterStandardPasses RegisterBufferMonitorPass0(
+    PassManagerBuilder::EP_EnabledOnOptLevel0, registerBufferMonitorPass);

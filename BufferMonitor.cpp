@@ -12,6 +12,7 @@
 #include "llvm/Transforms/IPO/PassManagerBuilder.h"
 
 
+
 #include <map>
 #include <set>
 #include <string>
@@ -823,17 +824,18 @@ struct BufferMonitor : public ModulePass
 
 } // namespace
 
-char BufferMonitor::ID = 1;
+char BufferMonitor::ID = 2;
 
-static void registerAFLPass(const PassManagerBuilder &,
-                            legacy::PassManagerBase &PM) {
-
-  PM.add(new BufferMonitor());
-
+static void registerBufferMonitorPass(const PassManagerBuilder &,
+                                      legacy::PassManagerBase &PM) 
+{
+    PM.add(new BufferMonitor());
 }
 
-static RegisterStandardPasses RegisterAFLPass(
-    PassManagerBuilder::EP_ModuleOptimizerEarly, registerAFLPass);
+// Run BufferMonitor at the end of the optimization pipeline
+static RegisterStandardPasses RegisterBufferMonitorPass(
+    PassManagerBuilder::EP_ModuleOptimizerEarly, registerBufferMonitorPass);
 
-static RegisterStandardPasses RegisterAFLPass0(
-    PassManagerBuilder::EP_EnabledOnOptLevel0, registerAFLPass);
+// Also run BufferMonitor when optimizations are turned off (-O0)
+static RegisterStandardPasses RegisterBufferMonitorPass0(
+    PassManagerBuilder::EP_EnabledOnOptLevel0, registerBufferMonitorPass);

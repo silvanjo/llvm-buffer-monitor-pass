@@ -12,7 +12,8 @@
 #include "llvm/Transforms/IPO/PassManagerBuilder.h"
 
 
-#include <llvm/IR/Constants.h>
+#include <llvm/IR/DerivedTypes.h>
+#include <llvm/IR/LLVMContext.h>
 #include <map>
 #include <set>
 #include <string>
@@ -43,7 +44,7 @@ namespace
 struct BufferNode 
 {
     uint64_t BufferID;                  // Unique ID of this buffer
-    uint64_t highestAccessedIndex;  // The highest accessed index of this buffer during program execution
+    uint64_t highestAccessedIndex;      // The highest accessed index of this buffer during program execution
 
     void* bufferAddr;                   // Address of the allocated buffer
     size_t bufferSize;                  // Size of the buffer
@@ -235,12 +236,99 @@ struct BufferMonitor : public ModulePass
         return true;
     }
 
+    // Creates LLVM function for searching for the buffer with the given ID in the linked list, return null if buffer is not in the list 
+    Function* CreateGetBufferFunction()
+    {
+        LLVMContext& context = this->module->getContext();
+
+        // Get pointer type of BufferNode* using the default address space (0)
+        PointerType* bufferNodePtrType = PointerType::get(BufferNodeTy, 0); 
+
+        // The function returns a BufferNode* and gets a i8* (the address of the buffer). It's not a variadic function
+        FunctionType* functionType = FunctionType::get( bufferNodePtrType, 
+                                                        Type::getInt8PtrTy(context), 
+                                                        false);
+
+        Function* getBufferFunction = Function::Create( functionType, 
+                                                        Function::ExternalLinkage,
+                                                        "getBuffer",
+                                                        module);
+
+        // Set the name of the arguement
+        getBufferFunction->arg_begin()->setName("bufferAddress");
+
+        // Define the function body
+        BasicBlock* entry = BasicBlock::Create(context, "entry", getBufferFunction);
+        this->builder->SetInsertPoint(entry);
+
+        // Load BufferListHead
+        GlobalVariable* bufferListHead = this->module->getNamedGlobal("BufferListHead");
+        Value* head = this->builder->CreateLoad(bufferListHead->getType()->getPointerElementType(), bufferListHead, "current");
+
+        // Create an alloca instruction to store the current node
+        AllocaInst* currentNodeAlloca = builder->CreateAlloca(head->getType(), 0, "currentNodeAlloca");
+        builder->CreateStore(head, currentNodeAlloca);
+
+        // Create loop condition, loop body, and exit blocks
+        BasicBlock* checkIfHeadIsNull = BasicBlock::Create(context, "checkIfHeadIsNull", getBufferFunction);
+        BasicBlock* loopBody = BasicBlock::Create(context, "loopBody", getBufferFunction);
+        BasicBlock* exitBlock = BasicBlock::Create(context, "exitBlock", getBufferFunction);
+
+        this->builder->CreateBr(checkIfHeadIsNull);
+        this->builder->SetInsertPoint(checkIfHeadIsNull);
+
+        // Loop condition: check if current node is null
+        Type* bufferNodeType = head->getType();
+        Constant* nullConstant = Constant::getNullValue(bufferNodeType);
+        Value* headIsNull = this->builder->CreateICmpEQ(head, nullConstant, "isEnd");
+        this->builder->CreateCondBr(headIsNull, exitBlock, loopBody);
+
+        // Loop body: Check buffer address and traverse the list
+        this->builder->SetInsertPoint(loopBody);
+
+        // Load the current node from memory
+        Value* current = builder->CreateLoad(currentNodeAlloca->getType()->getPointerElementType(), currentNodeAlloca, "current");
+
+        Value* nodeDataAddr = this->builder->CreateStructGEP(BufferNodeTy, current, 2, "nodeDataAddr");
+        Value* nodeData = this->builder->CreateLoad(nodeDataAddr->getType()->getPointerElementType(), nodeDataAddr, "nodeData");
+        Value* isMatch = this->builder->CreateICmpEQ(nodeData, getBufferSizeFunction->arg_begin(), "isMatch");
+    
+        // Create blocks for the two possible cases
+        // 1. The current node is a match
+        // 2. The current node is not a match
+        BasicBlock* nodeFound = BasicBlock::Create(context, "nodeFound", getBufferSizeFunction);
+        BasicBlock* nextIteration = BasicBlock::Create(context, "nextIteration", getBufferSizeFunction);
+        this->builder->CreateCondBr(isMatch, nodeFound, nextIteration);
+
+        // If node was found return it
+        this->builder->SetInsertPoint(nodeFound);
+        this->builder->CreateRet(current);
+
+        // Move to next node
+        this->builder->SetInsertPoint(nextIteration);
+        Value* nextNodeAddr = this->builder->CreateStructGEP(BufferNodeTy, current, 4, "nextNodeAddr");
+        Value* nextNode = this->builder->CreateLoad(nextNodeAddr->getType()->getPointerElementType(), nextNodeAddr, "nextNode");
+       
+        // Store nextNode to access is it in the next iteration
+        builder->CreateStore(nextNode, currentNodeAlloca);
+
+        // Check if node is null (end of list)
+        Value* isEnd = this->builder->CreateICmpEQ(nextNode, nullConstant, "isEnd");
+        this->builder->CreateCondBr(isEnd, exitBlock, loopBody);
+        
+        // Exit block: If buffer not found return nullptr of type BufferNode*
+        this->builder->SetInsertPoint(exitBlock);
+        Value* nullptrBufferNode = Constant::getNullValue(bufferNodePtrType); 
+        this->builder->CreateRet(nullptrBufferNode);
+
+        return getBufferFunction;
+    }
+
     Function* CreateBufferSizeFunction()
     {
         LLVMContext& context = this->module->getContext();
 
         // Define the function signature
-        // Function type: i64(i8*)
         FunctionType* functionType = FunctionType::get( Type::getInt64Ty(context), 
                                                         Type::getInt8PtrTy(context), 
                                                         false);
@@ -254,7 +342,7 @@ struct BufferMonitor : public ModulePass
         // Set function argument name
         getBufferSizeFunction->arg_begin()->setName("bufferAddress");
 
-        // 2. Define the function body
+        // Define the function body
         BasicBlock* entry = BasicBlock::Create(context, "entry", getBufferSizeFunction);
         this->builder->SetInsertPoint(entry);
 
@@ -633,6 +721,7 @@ struct BufferMonitor : public ModulePass
             // Print the linked list containing all buffers
             builder->CreateCall(this->printBufferListFunction);
         #endif
+        builder->CreateCall(this->printBufferListFunction);
 
         // Close file
         std::vector<Type*> fcloseArgs;

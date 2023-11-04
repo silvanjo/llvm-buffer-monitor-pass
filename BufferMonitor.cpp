@@ -12,10 +12,11 @@
 #include "llvm/Transforms/IPO/PassManagerBuilder.h"
 
 
-
+#include <llvm/IR/Constants.h>
 #include <map>
 #include <set>
 #include <string>
+#include <cstdint>
 #include <iostream>
 
 // Print on console only when in debug mode
@@ -41,10 +42,13 @@ namespace
 // to have access to the buffer sizes at runtime
 struct BufferNode 
 {
-    void* bufferAddr;           // Address of the allocated buffer
-    size_t bufferSize;          // Size of the buffer
+    uint64_t BufferID;                  // Unique ID of this buffer
+    uint64_t highestAccessedIndex;  // The highest accessed index of this buffer during program execution
 
-    struct BufferNode* next;    // Pointer to the next node
+    void* bufferAddr;                   // Address of the allocated buffer
+    size_t bufferSize;                  // Size of the buffer
+
+    struct BufferNode* next;            // Pointer to the next node
 };
 
 
@@ -99,9 +103,11 @@ struct BufferMonitor : public ModulePass
 
         // Define the types of the fields in BufferNode
         std::vector<Type*> BufferNodeFields;
-        BufferNodeFields.push_back(PointerType::get(Type::getInt8Ty(context), 0)); // bufferAddr
-        BufferNodeFields.push_back(Type::getInt64Ty(context)); // bufferSize
-        BufferNodeFields.push_back(PointerType::get(BufferNodeTy, 0)); // next pointer set to NULL
+        BufferNodeFields.push_back(Type::getInt64Ty(context));                      // BufferID
+        BufferNodeFields.push_back(Type::getInt64Ty(context));                      // highestAccessedIndex
+        BufferNodeFields.push_back(PointerType::get(Type::getInt8Ty(context), 0));  // bufferAddr
+        BufferNodeFields.push_back(Type::getInt64Ty(context));                      // bufferSize
+        BufferNodeFields.push_back(PointerType::get(BufferNodeTy, 0));              // next pointer set to NULL
         
         // Set the fields for BufferNodeTy
         BufferNodeTy->setBody(BufferNodeFields);
@@ -280,7 +286,7 @@ struct BufferMonitor : public ModulePass
         // Load the current node from memory
         Value* current = builder->CreateLoad(currentNodeAlloca->getType()->getPointerElementType(), currentNodeAlloca, "current");
 
-        Value* nodeDataAddr = this->builder->CreateStructGEP(BufferNodeTy, current, 0, "nodeDataAddr");
+        Value* nodeDataAddr = this->builder->CreateStructGEP(BufferNodeTy, current, 2, "nodeDataAddr");
         Value* nodeData = this->builder->CreateLoad(nodeDataAddr->getType()->getPointerElementType(), nodeDataAddr, "nodeData");
         Value* isMatch = this->builder->CreateICmpEQ(nodeData, getBufferSizeFunction->arg_begin(), "isMatch");
     
@@ -293,13 +299,13 @@ struct BufferMonitor : public ModulePass
 
         // If size is found, extract size and return
         this->builder->SetInsertPoint(sizeFound);
-        Value* dataSizeAddr = this->builder->CreateStructGEP(BufferNodeTy, current, 1, "dataSizeAddr");
+        Value* dataSizeAddr = this->builder->CreateStructGEP(BufferNodeTy, current, 3, "dataSizeAddr");
         Value* dataSize = this->builder->CreateLoad(dataSizeAddr->getType()->getPointerElementType(), dataSizeAddr, "dataSize");
         this->builder->CreateRet(dataSize);
 
         // Move to next node
         this->builder->SetInsertPoint(nextIteration);
-        Value* nextNodeAddr = this->builder->CreateStructGEP(BufferNodeTy, current, 2, "nextNodeAddr");
+        Value* nextNodeAddr = this->builder->CreateStructGEP(BufferNodeTy, current, 4, "nextNodeAddr");
         Value* nextNode = this->builder->CreateLoad(nextNodeAddr->getType()->getPointerElementType(), nextNodeAddr, "nextNode");
        
         // Store nextNode to access is it in the next iteration
@@ -438,7 +444,7 @@ struct BufferMonitor : public ModulePass
         Value* current = builder->CreateLoad(currentNodeAlloca->getType()->getPointerElementType(), currentNodeAlloca, "current");
 
         // Fetch the data from the buffer node
-        Value *dataPtr = builder->CreateStructGEP(this->BufferNodeTy, current, 0, "dataPtr");
+        Value *dataPtr = builder->CreateStructGEP(this->BufferNodeTy, current, 2, "dataPtr");
         Value *data = builder->CreateLoad(dataPtr->getType()->getPointerElementType(), dataPtr, "data");
         
         // Print buffer address
@@ -447,7 +453,7 @@ struct BufferMonitor : public ModulePass
         builder->CreateCall(printfFunction, {formatAddrStringGlobal, data});
 
         // Fetch the dataSize 
-        Value *dataSizePtr = builder->CreateStructGEP(this->BufferNodeTy, current, 1, "dataSizePtr");
+        Value *dataSizePtr = builder->CreateStructGEP(this->BufferNodeTy, current, 3, "dataSizePtr");
         Value *dataSize = builder->CreateLoad(dataSizePtr->getType()->getPointerElementType(), dataSizePtr, "dataSize");
         
         // print bufferSize
@@ -456,7 +462,7 @@ struct BufferMonitor : public ModulePass
         builder->CreateCall(printfFunction, {formatSizeStringGlobal, dataSize});
 
         // Move to next node
-        Value *nextNodeAddr = this->builder->CreateStructGEP(this->BufferNodeTy, current, 2, "nextNodeAddr");
+        Value *nextNodeAddr = this->builder->CreateStructGEP(this->BufferNodeTy, current, 4, "nextNodeAddr");
         Value *nextNode = this->builder->CreateLoad(nextNodeAddr->getType()->getPointerElementType(), nextNodeAddr, "nextNode");
 
         // Store nextNode to access is it in the next iteration
@@ -478,6 +484,13 @@ struct BufferMonitor : public ModulePass
     {
         LLVMContext& context = this->module->getContext();
 
+        // Unique buffer id for each newly inserted buffer
+        static uint64_t BufferID = 0;
+        BufferID += 1;
+        Value* bufferIDValue = ConstantInt::get(Type::getInt64Ty(context), BufferID);
+
+        Value* zeroConstant = ConstantInt::get(Type::getInt64Ty(context), 0);
+
         // Get data layout of the module to exactly determine the size of the BufferNode struct
         const DataLayout& DL = module->getDataLayout();
 
@@ -495,9 +508,11 @@ struct BufferMonitor : public ModulePass
         newNode = builder->CreateBitCast(newNode, PointerType::getUnqual(BufferNodeTy));
 
         // Initialize the new node
-        builder->CreateStore(bufferAddress, builder->CreateStructGEP(BufferNodeTy, newNode, 0));  // Store address
-        builder->CreateStore(bufferSize, builder->CreateStructGEP(BufferNodeTy, newNode, 1));     // Store size
-        builder->CreateStore(nullPtr, builder->CreateStructGEP(BufferNodeTy, newNode, 2));        // Set next to nullptr
+        builder->CreateStore(bufferIDValue, builder->CreateStructGEP(this->BufferNodeTy, newNode, 0));  // Store BufferID
+        builder->CreateStore(zeroConstant,  builder->CreateStructGEP(this->BufferNodeTy, newNode, 1));  // Initialize highest accessed index with zero
+        builder->CreateStore(bufferAddress, builder->CreateStructGEP(this->BufferNodeTy, newNode, 2));  // Store address
+        builder->CreateStore(bufferSize,    builder->CreateStructGEP(this->BufferNodeTy, newNode, 3));  // Store size
+        builder->CreateStore(nullPtr,       builder->CreateStructGEP(this->BufferNodeTy, newNode, 4));  // Set next to nullptr
 
         // Insert the new node at the beginning of the linked list
         Value* currentHead = builder->CreateLoad(BufferListHead->getType()->getPointerElementType(), BufferListHead, "currentHead");

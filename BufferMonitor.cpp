@@ -517,7 +517,7 @@ struct BufferMonitor : public ModulePass
         // Insert the new node at the beginning of the linked list
         Value* currentHead = builder->CreateLoad(BufferListHead->getType()->getPointerElementType(), BufferListHead, "currentHead");
         builder->CreateStore(newNode, BufferListHead);                                              // Update the head of the list to point to the new node
-        builder->CreateStore(currentHead, builder->CreateStructGEP(BufferNodeTy, newNode, 2));      // Set next node of the new node to previous head           
+        builder->CreateStore(currentHead, builder->CreateStructGEP(BufferNodeTy, newNode, 4));      // Set next node of the new node to previous head           
     }
 
     // Returns true if the alloca instruction is a multi-dimensional array
@@ -824,7 +824,7 @@ struct BufferMonitor : public ModulePass
                     // Get the size of the buffer stored in the linked list
                     Value* bufferSize = builder->CreateCall(getBufferSizeFunction, { basePtr });
 
-                    // TODO: Write to file
+                    // Write the pointer address, the accessed byte and the size of the buffer to the file
                     builder->CreateCall(writeToFileFunction, { basePtr, accessedBytes, bufferSize });
                 
                 }

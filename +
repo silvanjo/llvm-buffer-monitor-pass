@@ -44,7 +44,7 @@ namespace
 struct BufferNode 
 {
     uint64_t BufferID;                  // Unique ID of this buffer
-    uint64_t highestAccessedByte;      // The highest accessed index of this buffer during program execution
+    uint64_t highestAccessedIndex;      // The highest accessed index of this buffer during program execution
 
     void* bufferAddr;                   // Address of the allocated buffer
     size_t bufferSize;                  // Size of the buffer
@@ -105,7 +105,7 @@ struct BufferMonitor : public ModulePass
         // Define the types of the fields in BufferNode
         std::vector<Type*> BufferNodeFields;
         BufferNodeFields.push_back(Type::getInt64Ty(context));                      // BufferID
-        BufferNodeFields.push_back(Type::getInt64Ty(context));                      // highestAccessedByte
+        BufferNodeFields.push_back(Type::getInt64Ty(context));                      // highestAccessedIndex
         BufferNodeFields.push_back(PointerType::get(Type::getInt8Ty(context), 0));  // bufferAddr
         BufferNodeFields.push_back(Type::getInt64Ty(context));                      // bufferSize
         BufferNodeFields.push_back(PointerType::get(BufferNodeTy, 0));              // next pointer set to NULL
@@ -297,7 +297,7 @@ struct BufferMonitor : public ModulePass
         // 1. The current node is a match
         // 2. The current node is not a match
         BasicBlock* nodeFound = BasicBlock::Create(context, "nodeFound", getBufferFunction);
-        BasicBlock* nextIteration = BasicBlock::Create(context, "nextIteration", getBufferFunction);
+        BasicBlock* nextIteration = BasicBlock::Create(context, "nextIteration", getBufferSizeFunction);
         this->builder->CreateCondBr(isMatch, nodeFound, nextIteration);
 
         // If node was found return it
@@ -439,19 +439,19 @@ struct BufferMonitor : public ModulePass
         Value* headIsNull = this->builder->CreateICmpEQ(head, nullConstant, "isEnd");
         this->builder->CreateCondBr(headIsNull, exit, loopBody);
 
-        this->builder->SetInsertPoint(loopBody);
+        builder->SetInsertPoint(loopBody);
 
         // Load the current node from memory
-        Value* current = this->builder->CreateLoad(currentNodeAlloca->getType()->getPointerElementType(), currentNodeAlloca, "current");
+        Value* current = builder->CreateLoad(currentNodeAlloca->getType()->getPointerElementType(), currentNodeAlloca, "current");
 
         // Fetch the data from the buffer node
-        Value *dataPtr = this->builder->CreateStructGEP(this->BufferNodeTy, current, 2, "dataPtr");
-        Value *data = this->builder->CreateLoad(dataPtr->getType()->getPointerElementType(), dataPtr, "data");
+        Value *dataPtr = builder->CreateStructGEP(this->BufferNodeTy, current, 2, "dataPtr");
+        Value *data = builder->CreateLoad(dataPtr->getType()->getPointerElementType(), dataPtr, "data");
         
         // Print buffer address
         std::string formatAddrString = "%p\n";
         Value* formatAddrStringGlobal = builder->CreateGlobalStringPtr(formatAddrString, "formatAddrString", 0, module);
-        this->builder->CreateCall(printfFunction, {formatAddrStringGlobal, data});
+        builder->CreateCall(printfFunction, {formatAddrStringGlobal, data});
 
         // Fetch the dataSize 
         Value *dataSizePtr = builder->CreateStructGEP(this->BufferNodeTy, current, 3, "dataSizePtr");
@@ -823,18 +823,8 @@ struct BufferMonitor : public ModulePass
                         basePtr = builder->CreateBitCast(basePtr, Type::getInt8PtrTy(context));
                     }
 
-                    // Get buffer with this base address from linked list
-                    CallInst* buffer = builder->CreateCall(getBufferFunction, { basePtr });
-
-                    // Get the elements of the buffer
-                    Value* bufferIDPtr = this->builder->CreateStructGEP(BufferNodeTy, buffer, 0);
-                    Value* bufferID    = this->builder->CreateLoad(bufferIDPtr, "BufferID");
-
-                    Value* highestAccessedBytePtr = this->builder->CreateStructGEP(BufferNodeTy, buffer, 1);
-                    Value* highestAccessedByte    = this->builder->CreateLoad(highestAccessedBytePtr, "HighestByte");
-
-                    Value* bufferSizePtr = this->builder->CreateStructGEP(BufferNodeTy, buffer, 3); 
-                    Value* bufferSize    = this->builder->CreateLoad(bufferSizePtr, "BufferSize");
+                    // Get the size of the buffer stored in the linked list
+                    Value* bufferSize = builder->CreateCall(getBufferSizeFunction, { basePtr });
 
                     // Write the pointer address, the accessed byte and the size of the buffer to the file
                     builder->CreateCall(writeToFileFunction, { basePtr, accessedBytes, bufferSize });

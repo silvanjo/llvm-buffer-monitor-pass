@@ -74,6 +74,7 @@ struct BufferMonitor : public ModulePass
     // Custom LLVM functions
     Function* getBufferFunction;
     Function* writeToFileFunction;
+    Function* setHighestAccessedByteFunction;
     Function* printBufferListFunction;
 
     Value* mode;
@@ -324,36 +325,101 @@ struct BufferMonitor : public ModulePass
         return getBufferFunction;
     }
 
+    // LLVM function that updates the highestAccessedByte member of BufferNode if the passed index 
+    // is higher then the current value of highestAccessedByte
+    // This function returns true if value was updated
+    Function* CreateSetHighestAccessedByteFunction()
+    {
+        LLVMContext& context = this->module->getContext();
+
+        // Get pointer type of BufferNode* using the default address space (0)
+        PointerType* buffernodePtrType = PointerType::get(BufferNodeTy, 0);
+        // Get nullptr of type BufferNotTy
+        Constant* bufferNodeNullptr = ConstantPointerNull::get(buffernodePtrType);
+        // Specify the function type of writeToFileFunction 
+        FunctionType* setHighestAccessedByteFunctionType = FunctionType::get( Type::getInt1Ty(context),
+                                                                              { buffernodePtrType, Type::getInt64Ty(context) },
+                                                                              false);
+
+        Function* setHightestAccessedByteFunction = Function::Create( setHighestAccessedByteFunctionType,
+                                                                      Function::ExternalLinkage,
+                                                                      "setHighestAccessedByte",
+                                                                      this->module);
+        
+        BasicBlock* entry = BasicBlock::Create(context, "Entry", writeToFileFunction);
+        // Body of the function
+        BasicBlock* body = BasicBlock::Create(context, "Body", writeToFileFunction);
+        // This basic block return true (highestAccessedByte changed)
+        BasicBlock* returnTrue = BasicBlock::Create(context, "Changed"); 
+        // This basic block returns false (highestAccessedByte not changed)
+        BasicBlock* returnFalse = BasicBlock::Create(context, "NotChanged", writeToFileFunction);
+
+        // Get buffer from argument list
+        Value* buffer = &*setHightestAccessedByteFunction->arg_begin();    
+        // Get accessed byte from argument list
+        Value* accessedByte = setHightestAccessedByteFunction->arg_begin() + 1;
+      
+        this->builder->SetInsertPoint(entry);
+
+        // Check if the passed buffer node is null
+        Value* bufferNodeIsNullptr = this->builder->CreateICmpEQ(buffer, bufferNodeNullptr); 
+    
+        // Create a conditional branch
+        this->builder->CreateCondBr(bufferNodeIsNullptr, returnFalse, body);
+
+        this->builder->SetInsertPoint(body);
+
+        // TODO: Check if current highestAccessedByte is smaller then accessedByte
+        // If highestAccessedByte was changed then return true, else return false
+
+        this->builder->SetInsertPoint(returnTrue);
+        // True variable
+        Value* trueValue = ConstantInt::get(Type::getInt1Ty(context), 1);
+        // Return true
+        this->builder->CreateRet(trueValue);
+
+        this->builder->SetInsertPoint(returnFalse);
+        // False Value
+        Value* falseValue = ConstantInt::get(Type::getInt1Ty(context), 0);
+        // Return false
+        this->builder->CreateRet(falseValue);
+        
+        return setHightestAccessedByteFunction;
+    }
+
+    // LLVM function for writes data of BufferNode to file
     Function* CreateWriteToFileFunction()
     {
         LLVMContext& context = this->module->getContext();
 
         // Get pointer type of BufferNode* using the default address space (0)
         PointerType* bufferNodePtrType = PointerType::get(BufferNodeTy, 0); 
+        // Get nullptr of type BufferNotTy
         Constant* bufferNodeNullptr = ConstantPointerNull::get(bufferNodePtrType);
-
-        FunctionType* writeToFileFunctionType = FunctionType::get(Type::getVoidTy(context), 
+        // Specify the function type of writeToFileFunction 
+        FunctionType* writeToFileFunctionType = FunctionType::get(  Type::getVoidTy(context), 
                                                                     {bufferNodePtrType, Type::getInt64Ty(context)}, 
                                                                     false);
 
-        Function* writeToFileFunction = Function::Create(writeToFileFunctionType, 
+        Function* writeToFileFunction = Function::Create(   writeToFileFunctionType, 
                                                             Function::ExternalLinkage, 
                                                             "writeToFile", 
-                                                            module);
+                                                            this->module);
 
         BasicBlock* entry = BasicBlock::Create(context, "entry", writeToFileFunction);
         // Create a basic block for the printf call
         BasicBlock* thenBlockSGE = BasicBlock::Create(context, "then_buffer_found", writeToFileFunction);
         // Create a basic block for continuation after printf
         BasicBlock* continueBlockSGE = BasicBlock::Create(context, "continue_buffer_not_found", writeToFileFunction);
-        // Get the buffer from argument list
+
+        // Get buffer from argument list
         Value* buffer = &*writeToFileFunction->arg_begin();    
         // Get accessed byte from argument list
         Value* accessedByte = writeToFileFunction->arg_begin() + 1; 
 
-        builder->SetInsertPoint(entry);
+        this->builder->SetInsertPoint(entry);
     
-        // Check if buffer node is nullptr
+        // Check if the passed buffer node is null
         Value* bufferNodeIsNullptr = this->builder->CreateICmpEQ(buffer, bufferNodeNullptr);  
 
         // Create a conditional branch
@@ -788,6 +854,7 @@ struct BufferMonitor : public ModulePass
                     Value* bufferBufferNodeTy = builder->CreateBitCast(buffer, bufferNodePtrType, "BufferNodePtr");
 
                     // TODO: Check if accessed byte is the highest accessed byte of this buffer (bufferBufferNodeTy)
+                    
 
                     // Write BufferNode data to file
                     builder->CreateCall(writeToFileFunction, { bufferBufferNodeTy, accessedBytes });

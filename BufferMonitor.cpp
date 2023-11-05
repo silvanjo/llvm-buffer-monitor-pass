@@ -346,7 +346,6 @@ struct BufferMonitor : public ModulePass
         BasicBlock* thenBlockSGE = BasicBlock::Create(context, "then_buffer_found", writeToFileFunction);
         // Create a basic block for continuation after printf
         BasicBlock* continueBlockSGE = BasicBlock::Create(context, "continue_buffer_not_found", writeToFileFunction);
-
         // Get the buffer from argument list
         Value* buffer = &*writeToFileFunction->arg_begin();    
         // Get accessed byte from argument list
@@ -377,10 +376,10 @@ struct BufferMonitor : public ModulePass
         Value* bufferSize    = this->builder->CreateLoad(bufferSizePtr, "BufferSize");
 
         // Create output string for the file
-        std::string outputString = "Buffer access %p: %d of size: %d\n";
+        std::string outputString = "Buffer access %p: %d of size: %d; ID: %d; HAB: %d\n";
         Value* formatString = this->builder->CreateGlobalStringPtr(outputString.c_str());
         Value* loadedFilePtr = this->builder->CreateLoad(globalFilePtr->getType()->getPointerElementType(), globalFilePtr);
-        this->builder->CreateCall(fprintfFunc, { loadedFilePtr, formatString, bufferAddress, accessedByte, bufferSize });
+        this->builder->CreateCall(fprintfFunc, { loadedFilePtr, formatString, bufferAddress, accessedByte, bufferSize, bufferID, highestAccessedByte });
     
         // Jump to the continue block after printf
         this->builder->CreateBr(continueBlockSGE);
@@ -550,40 +549,6 @@ struct BufferMonitor : public ModulePass
         }
 
         return false;
-    }
-
-    void AddGlobalsToLinkedList(Module& module)
-    {
-        LLVMContext& context = module.getContext();
-
-        // Get buffers that are allocated globally and store them in the linked list
-        for (auto& global : module.globals()) 
-        {
-            DEBUG_PRINT_INFO("Working on global: " << global.getName().str());
-
-            GlobalVariable* globalVariable = &global;
-
-            // Check if the global variable is an array
-            if (ArrayType* arrayType = dyn_cast<ArrayType>(globalVariable->getValueType())) 
-            {
-                DEBUG_PRINT_INFO("Global is a buffer: " << global.getName().str());
-
-                // Get number of elements in the array
-                uint64_t arraySize = arrayType->getNumElements();  
-                // Convert size to LLVM Value* for inserting into the linked list
-                Value* bufferSizeValue = ConstantInt::get(Type::getInt64Ty(context), arraySize);
-                
-                // Cast the global variable's address to i8*
-                Value* bufferAddressi8 = globalVariable;
-                if (globalVariable->getType() != Type::getInt8PtrTy(context)) 
-                {
-                    bufferAddressi8 = builder->CreateBitCast(globalVariable, Type::getInt8PtrTy(context));
-                }
-
-                // Insert global buffer to linked list
-                InsertBufferToList(bufferAddressi8, bufferSizeValue);
-            }
-        }
     }
 
     void DetermineBaseTypeOfArray()
@@ -821,7 +786,10 @@ struct BufferMonitor : public ModulePass
                     PointerType* bufferNodePtrType = PointerType::get(BufferNodeTy, 0); 
                     // Cast the return type of the getBufferFunction (CallInst) to BufferNode*
                     Value* bufferBufferNodeTy = builder->CreateBitCast(buffer, bufferNodePtrType, "BufferNodePtr");
-                    // Write the pointer address, the accessed byte and the size of the buffer to the file
+
+                    // TODO: Check if accessed byte is the highest accessed byte of this buffer (bufferBufferNodeTy)
+
+                    // Write BufferNode data to file
                     builder->CreateCall(writeToFileFunction, { bufferBufferNodeTy, accessedBytes });
                 
                 }

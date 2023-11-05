@@ -328,14 +328,12 @@ struct BufferMonitor : public ModulePass
     {
         LLVMContext& context = this->module->getContext();
 
-        std::vector<Type*> paramTypes = {
-            Type::getInt8PtrTy(context),  // pointer to int8 (basePtr)
-            Type::getInt64Ty(context),    // int64 (accessedBytes)
-            Type::getInt64Ty(context)     // another int64 (bufferSize)
-        };
+        // Get pointer type of BufferNode* using the default address space (0)
+        PointerType* bufferNodePtrType = PointerType::get(BufferNodeTy, 0); 
+        Constant* bufferNodeNullptr = ConstantPointerNull::get(bufferNodePtrType);
 
         FunctionType* writeToFileFunctionType = FunctionType::get(Type::getVoidTy(context), 
-                                                                    paramTypes, 
+                                                                    {bufferNodePtrType, Type::getInt64Ty(context)}, 
                                                                     false);
 
         Function* writeToFileFunction = Function::Create(writeToFileFunctionType, 
@@ -344,58 +342,52 @@ struct BufferMonitor : public ModulePass
                                                             module);
 
         BasicBlock* entry = BasicBlock::Create(context, "entry", writeToFileFunction);
+        // Create a basic block for the printf call
+        BasicBlock* thenBlockSGE = BasicBlock::Create(context, "then_buffer_found", writeToFileFunction);
+        // Create a basic block for continuation after printf
+        BasicBlock* continueBlockSGE = BasicBlock::Create(context, "continue_buffer_not_found", writeToFileFunction);
+
+        // Get the buffer from argument list
+        Value* buffer = &*writeToFileFunction->arg_begin();    
+        // Get accessed byte from argument list
+        Value* accessedByte = writeToFileFunction->arg_begin() + 1; 
 
         builder->SetInsertPoint(entry);
-
-        // Get values from arguments
-        Value* basePtr = writeToFileFunction->arg_begin();          // Get base pointer
-        Value* accessedByte = writeToFileFunction->arg_begin() + 1; // Get accessed byte
-        Value* bufferSize = writeToFileFunction->arg_begin() + 2;   // Get buffer size
-
-        // Check if the buffer size is known
-        // If not, don't write buffer access to file if not in debug mode
-
-        #ifdef DEBUG
-
-            // Create output string for the file
-            std::string outputString = "Buffer access %p: %d of size: %d\n";
-            Value* formatString = this->builder->CreateGlobalStringPtr(outputString.c_str());
-            Value* loadedFilePtr = this->builder->CreateLoad(globalFilePtr->getType()->getPointerElementType(), globalFilePtr);
-            builder->CreateCall(fprintfFunc, { loadedFilePtr, formatString, basePtr, accessedByte, bufferSize });
-
-        #else
-
     
-            Value* bufferSize64 = this->builder->CreateIntCast(bufferSize, Type::getInt64Ty(context),  true);
+        // Check if buffer node is nullptr
+        Value* bufferNodeIsNullptr = this->builder->CreateICmpEQ(buffer, bufferNodeNullptr);  
 
-            // Compare bufferSize with 0
-            Value* conditionSGE = this->builder->CreateICmpSGE(bufferSize64, ConstantInt::get(Type::getInt64Ty(context), 0), "BufferSizeSGEZero");
+        // Create a conditional branch
+        this->builder->CreateCondBr(bufferNodeIsNullptr, continueBlockSGE, thenBlockSGE);
 
-            // Create a basic block for the printf call
-            BasicBlock* thenBlockSGE = BasicBlock::Create(context, "then_buffer_found", writeToFileFunction);
-            // Create a basic block for continuation after printf
-            BasicBlock* continueBlockSGE = BasicBlock::Create(context, "continue_buffer_not_found", writeToFileFunction);
+        // Insert printf inside thenBlock
+        this->builder->SetInsertPoint(thenBlockSGE);
 
-            // Create a conditional branch
-            this->builder->CreateCondBr(conditionSGE, thenBlockSGE, continueBlockSGE);
+        // Get the elements of the buffer node
+        Value* bufferIDPtr = this->builder->CreateStructGEP(BufferNodeTy, buffer, 0);
+        Value* bufferID    = this->builder->CreateLoad(bufferIDPtr, "BufferID");
 
-            // Insert printf inside thenBlock
-            this->builder->SetInsertPoint(thenBlockSGE);
-        
-            // Create output string for the file
-            std::string outputString = "Buffer access %p: %d of size: %d\n";
-            Value* formatString = this->builder->CreateGlobalStringPtr(outputString.c_str());
-            Value* loadedFilePtr = this->builder->CreateLoad(globalFilePtr->getType()->getPointerElementType(), globalFilePtr);
-            this->builder->CreateCall(fprintfFunc, { loadedFilePtr, formatString, basePtr, accessedByte, bufferSize });
-        
-            // Jump to the continue block after printf
-            this->builder->CreateBr(continueBlockSGE);
+        Value* highestAccessedBytePtr = this->builder->CreateStructGEP(BufferNodeTy, buffer, 1);
+        Value* highestAccessedByte    = this->builder->CreateLoad(highestAccessedBytePtr, "HighestByte");
 
-            // Set the insert point back to the continue block
-            this->builder->SetInsertPoint(continueBlockSGE);
+        Value* bufferAddressPtr = this->builder->CreateStructGEP(BufferNodeTy, buffer, 2);
+        Value* bufferAddress    = this->builder->CreateLoad(bufferAddressPtr, "BufferAddress");
+
+        Value* bufferSizePtr = this->builder->CreateStructGEP(BufferNodeTy, buffer, 3); 
+        Value* bufferSize    = this->builder->CreateLoad(bufferSizePtr, "BufferSize");
+
+        // Create output string for the file
+        std::string outputString = "Buffer access %p: %d of size: %d\n";
+        Value* formatString = this->builder->CreateGlobalStringPtr(outputString.c_str());
+        Value* loadedFilePtr = this->builder->CreateLoad(globalFilePtr->getType()->getPointerElementType(), globalFilePtr);
+        this->builder->CreateCall(fprintfFunc, { loadedFilePtr, formatString, bufferAddress, accessedByte, bufferSize });
     
-        #endif
+        // Jump to the continue block after printf
+        this->builder->CreateBr(continueBlockSGE);
 
+        // Set the insert point back to the continue block
+        this->builder->SetInsertPoint(continueBlockSGE);
+    
         builder->CreateRetVoid();
 
         return writeToFileFunction;
@@ -825,19 +817,12 @@ struct BufferMonitor : public ModulePass
 
                     // Get buffer with this base address from linked list
                     CallInst* buffer = builder->CreateCall(getBufferFunction, { basePtr });
-
-                    // Get the elements of the buffer
-                    Value* bufferIDPtr = this->builder->CreateStructGEP(BufferNodeTy, buffer, 0);
-                    Value* bufferID    = this->builder->CreateLoad(bufferIDPtr, "BufferID");
-
-                    Value* highestAccessedBytePtr = this->builder->CreateStructGEP(BufferNodeTy, buffer, 1);
-                    Value* highestAccessedByte    = this->builder->CreateLoad(highestAccessedBytePtr, "HighestByte");
-
-                    Value* bufferSizePtr = this->builder->CreateStructGEP(BufferNodeTy, buffer, 3); 
-                    Value* bufferSize    = this->builder->CreateLoad(bufferSizePtr, "BufferSize");
-
+                    // Get pointer type of BufferNode* using the default address space (0)
+                    PointerType* bufferNodePtrType = PointerType::get(BufferNodeTy, 0); 
+                    // Cast the return type of the getBufferFunction (CallInst) to BufferNode*
+                    Value* bufferBufferNodeTy = builder->CreateBitCast(buffer, bufferNodePtrType, "BufferNodePtr");
                     // Write the pointer address, the accessed byte and the size of the buffer to the file
-                    builder->CreateCall(writeToFileFunction, { basePtr, accessedBytes, bufferSize });
+                    builder->CreateCall(writeToFileFunction, { bufferBufferNodeTy, accessedBytes });
                 
                 }
             } 

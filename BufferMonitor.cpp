@@ -94,6 +94,8 @@ struct BufferMonitor : public ModulePass
 
     bool init(Module& M) 
     {
+        std::cout << "Initialize BufferMonitor pass ..." << std::endl;
+
         this->module = &M;
 
         // Get context, module and create IRBuilder for instrumentations
@@ -412,7 +414,7 @@ struct BufferMonitor : public ModulePass
         return setHighestAccessedByteFunction;
     }
 
-    // LLVM function for writes data of BufferNode to file
+    // LLVM function that takes a BufferNode* and writes it's data to the file
     Function* CreateWriteToFileFunction()
     {
         LLVMContext& context = this->module->getContext();
@@ -467,7 +469,7 @@ struct BufferMonitor : public ModulePass
         Value* bufferSize    = this->builder->CreateLoad(bufferSizePtr, "BufferSize");
 
         // Create output string for the file
-        std::string outputString = "Buffer access %p: %d of size: %d; ID: %d; HAB: %d\n";
+        std::string outputString = "Buffer access %p; Accessed index %d; Buffer size %d; ID %d; HAB %d\n";
         Value* formatString = this->builder->CreateGlobalStringPtr(outputString.c_str());
         Value* loadedFilePtr = this->builder->CreateLoad(globalFilePtr->getType()->getPointerElementType(), globalFilePtr);
         this->builder->CreateCall(fprintfFunc, { loadedFilePtr, formatString, bufferAddress, accessedByte, bufferSize, bufferID, highestAccessedByte });
@@ -901,7 +903,7 @@ static void registerBufferMonitorPass(const PassManagerBuilder &,
 
 // Run BufferMonitor at the end of the optimization pipeline
 static RegisterStandardPasses RegisterBufferMonitorPass(
-    PassManagerBuilder::EP_ModuleOptimizerEarly, registerBufferMonitorPass);
+    PassManagerBuilder::EP_OptimizerLast, registerBufferMonitorPass);
 
 // Also run BufferMonitor when optimizations are turned off (-O0)
 static RegisterStandardPasses RegisterBufferMonitorPass0(

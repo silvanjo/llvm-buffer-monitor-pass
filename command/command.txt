@@ -1,0 +1,2 @@
+clang++ -shared -o ../shared/BufferMonitor.so -fPIC $(llvm-config --cxxflags) ../BufferMonitor.cpp $(llvm-config --ldflags)
+clang++ -Xclang -load -Xclang ../shared/BufferMonitor.so test.cpp -o transformed

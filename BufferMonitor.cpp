@@ -75,6 +75,7 @@ struct BufferMonitor : public ModulePass
     Function* getBufferFunction;
     Function* writeToFileFunction;
     Function* printBufferListFunction;
+    Function* writeBufferListToFileFunction;
     Function* setHighestAccessedByteFunction;
 
     Value* mode;
@@ -214,7 +215,7 @@ struct BufferMonitor : public ModulePass
         // Check if function is correct after transformations
         if (verifyFunction(*this->printBufferListFunction, &llvm::errs())) 
         {
-            DEBUG_PRINT_ERROR("printBufferListFunction Function verification failed after transformations!");
+            DEBUG_PRINT_ERROR("printBufferListFunction function verification failed after transformations!");
             #ifdef DEBUG
                 this->printBufferListFunction->dump();
             #endif
@@ -225,7 +226,7 @@ struct BufferMonitor : public ModulePass
         // Check if function is correct after transformations
         if (verifyFunction(*this->setHighestAccessedByteFunction, &llvm::errs())) 
         {
-            DEBUG_PRINT_ERROR("printBufferListFunction Function verification failed after transformations!");
+            DEBUG_PRINT_ERROR("printBufferListFunction function verification failed after transformations!");
             #ifdef DEBUG
                 this->setHighestAccessedByteFunction->dump();
             #endif
@@ -236,16 +237,28 @@ struct BufferMonitor : public ModulePass
 
         if (verifyFunction(*this->writeToFileFunction, &llvm::errs())) 
         {
-            DEBUG_PRINT_ERROR("writeToFileFunction Function verification failed after transformations!");
+            DEBUG_PRINT_ERROR("writeToFileFunction function verification failed after transformations!");
+            #ifdef DEBUG
+                this->writeToFileFunction->dump();
+            #endif
+        }
+
+        this->writeBufferListToFileFunction = CreateWriteBufferListToFileFunction();
+
+        if (verifyFunction(*this->writeBufferListToFileFunction, &llvm::errs()))
+        {
+            DEBUG_PRINT_ERROR("writeBufferListToFileFunction function verification failed after transformations!");
             #ifdef DEBUG
                 this->writeToFileFunction->dump();
             #endif
         }
 
         // Add functions to skip
-        skipFunctions.insert(this->writeToFileFunction);
         skipFunctions.insert(this->getBufferFunction);
+        skipFunctions.insert(this->writeToFileFunction);
         skipFunctions.insert(this->printBufferListFunction);
+        skipFunctions.insert(this->writeBufferListToFileFunction);
+        skipFunctions.insert(this->setHighestAccessedByteFunction);
 
         return true;
     }
@@ -485,6 +498,86 @@ struct BufferMonitor : public ModulePass
         return writeToFileFunction;
     }
 
+    Function* CreateWriteBufferListToFileFunction()
+    {
+        LLVMContext& context = this->module->getContext();
+
+        // Get pointer type of BufferNode* using the default address space (0)
+        PointerType* bufferNodePtrType = PointerType::get(BufferNodeTy, 0); 
+        // Get nullptr of type BufferNotTy
+        Constant* bufferNodeNullptr = ConstantPointerNull::get(bufferNodePtrType);
+
+        FunctionType* writeBufferListToFileType = FunctionType::get(Type::getVoidTy(context), false);
+
+        Function* writeBufferListToFileFunction = Function::Create( writeBufferListToFileType,
+                                                                    Function::ExternalLinkage,
+                                                                    "writeBufferListToFile",
+                                                                    this->module);
+        
+        BasicBlock* entry = BasicBlock::Create(context, "Entry", writeBufferListToFileFunction);
+        BasicBlock* checkIfHeadIsNull = BasicBlock::Create(context, "LoopBody", writeBufferListToFileFunction);
+        BasicBlock* loopBody = BasicBlock::Create(context, "LoopBody", writeBufferListToFileFunction);
+        BasicBlock* exit = BasicBlock::Create(context, "Exit", writeBufferListToFileFunction);
+
+        this->builder->SetInsertPoint(entry);
+
+        // Load the head of the buffer list
+        GlobalVariable* bufferListHead = this->module->getNamedGlobal("BufferListHead");
+        Value* head = this->builder->CreateLoad(bufferListHead->getType()->getPointerElementType(), bufferListHead, "head");
+
+        // Create an alloca instruction to store the current node
+        AllocaInst* currentNodeAlloca = this->builder->CreateAlloca(head->getType(), 0, "currentNodeAlloca");
+        this->builder->CreateStore(head, currentNodeAlloca);
+
+        this->builder->CreateBr(checkIfHeadIsNull); 
+        
+        this->builder->SetInsertPoint(checkIfHeadIsNull);
+
+        // Check if head is null (buffer list is empty)
+        Value* headIsNull = this->builder->CreateICmpEQ(head, bufferNodeNullptr); 
+        this->builder->CreateCondBr(headIsNull, exit, loopBody);
+
+        this->builder->SetInsertPoint(loopBody);
+
+        Value* currentNode = this->builder->CreateLoad(this->BufferNodeTy, 0, "current");
+
+        // Fetch data from BufferNode
+        Value* bufferIDPtr = this->builder->CreateStructGEP(BufferNodeTy, currentNode, 0);
+        Value* bufferID    = this->builder->CreateLoad(bufferIDPtr, "BufferID");
+
+        Value* highestAccessedBytePtr = this->builder->CreateStructGEP(BufferNodeTy, currentNode, 1);
+        Value* highestAccessedByte    = this->builder->CreateLoad(highestAccessedBytePtr, "HighestByte");
+
+        Value* bufferAddressPtr = this->builder->CreateStructGEP(BufferNodeTy, currentNode, 2);
+        Value* bufferAddress    = this->builder->CreateLoad(bufferAddressPtr, "BufferAddress");
+
+        Value* bufferSizePtr = this->builder->CreateStructGEP(BufferNodeTy, currentNode, 3); 
+        Value* bufferSize    = this->builder->CreateLoad(bufferSizePtr, "BufferSize");
+       
+        // TODO: Write node data to file
+        std::string outputString = "Buffer access %p; Buffer size %d; ID %d; HAB %d\n";
+        Value* formatString = this->builder->CreateGlobalStringPtr(outputString.c_str());
+        Value* loadedFilePtr = this->builder->CreateLoad(globalFilePtr->getType()->getPointerElementType(), globalFilePtr);
+        this->builder->CreateCall(fprintfFunc, { loadedFilePtr, formatString, bufferAddress, bufferSize, bufferID, highestAccessedByte });
+        
+        // Move to next node
+        Value *nextNodePtr = this->builder->CreateStructGEP(this->BufferNodeTy, currentNodeAlloca, 4, "nextNodeAddr");
+        Value *nextNode = this->builder->CreateLoad(nextNodePtr->getType()->getPointerElementType(), nextNodePtr, "nextNode");
+        this->builder->CreateStore(nextNode, currentNodeAlloca);
+
+        // Check if node is null (end of list)
+        Value* isEnd = this->builder->CreateICmpEQ(nextNode, bufferNodeNullptr, "isEnd");
+        this->builder->CreateCondBr(isEnd, exit, loopBody);
+
+        this->builder->CreateBr(exit);
+
+        // Create the exit basic block and return instruction
+        this->builder->SetInsertPoint(exit);
+        this->builder->CreateRetVoid();
+
+        return writeBufferListToFileFunction;   
+    }
+
     Function* CreatePrintBufferListFunction()
     {
         LLVMContext& context = this->module->getContext();
@@ -492,13 +585,18 @@ struct BufferMonitor : public ModulePass
         // Create the printBufferList function
         FunctionType* printBufferListType = FunctionType::get(Type::getVoidTy(context), false);
         
-        Function* printBufferList = Function::Create(printBufferListType, 
+        Function* printBufferList = Function::Create(   printBufferListType, 
                                                         Function::ExternalLinkage, 
                                                         "printBufferList", 
                                                         this->module);
 
         // Create the entry basic block
         BasicBlock *entry = BasicBlock::Create(context, "entry", printBufferList);
+        // Create BasicBlocks for loop condition, loop body, and exit blocks
+        BasicBlock* checkIfHeadIsNull = BasicBlock::Create(context, "checkIfHeadIsNull", printBufferList);
+        BasicBlock* loopBody = BasicBlock::Create(context, "loopBody", printBufferList);
+        BasicBlock* exit = BasicBlock::Create(context, "exit", printBufferList);
+
         builder->SetInsertPoint(entry);
 
         // Load BufferListHead
@@ -506,15 +604,11 @@ struct BufferMonitor : public ModulePass
         Value* head = this->builder->CreateLoad(bufferListHead->getType()->getPointerElementType(), bufferListHead, "head");
 
         // Create an alloca instruction to store the current node
-        AllocaInst* currentNodeAlloca = builder->CreateAlloca(head->getType(), 0, "currentNodeAlloca");
+        AllocaInst* currentNodeAlloca = builder->CreateAlloca(head->getType(), 0, "currentNode");
         builder->CreateStore(head, currentNodeAlloca);
 
-        // Create loop condition, loop body, and exit blocks
-        BasicBlock* checkIfHeadIsNull = BasicBlock::Create(context, "checkIfHeadIsNull", printBufferList);
-        BasicBlock* loopBody = BasicBlock::Create(context, "loopBody", printBufferList);
-        BasicBlock* exit = BasicBlock::Create(context, "exit", printBufferList);
-
         builder->CreateBr(checkIfHeadIsNull);
+
         builder->SetInsertPoint(checkIfHeadIsNull);
 
         // Check if head node is null 
@@ -547,8 +641,8 @@ struct BufferMonitor : public ModulePass
         builder->CreateCall(printfFunction, {formatSizeStringGlobal, dataSize});
 
         // Move to next node
-        Value *nextNodeAddr = this->builder->CreateStructGEP(this->BufferNodeTy, current, 4, "nextNodeAddr");
-        Value *nextNode = this->builder->CreateLoad(nextNodeAddr->getType()->getPointerElementType(), nextNodeAddr, "nextNode");
+        Value *nextNodePtr = this->builder->CreateStructGEP(this->BufferNodeTy, current, 4, "nextNodeAddr");
+        Value *nextNode = this->builder->CreateLoad(nextNodePtr->getType()->getPointerElementType(), nextNodePtr, "nextNode");
 
         // Store nextNode to access is it in the next iteration
         builder->CreateStore(nextNode, currentNodeAlloca);
@@ -684,7 +778,9 @@ struct BufferMonitor : public ModulePass
             // Print the linked list containing all buffers
             builder->CreateCall(this->printBufferListFunction);
         #endif
+
         builder->CreateCall(this->printBufferListFunction);
+        this->builder->CreateCall(this->writeBufferListToFileFunction);
 
         // Close file
         std::vector<Type*> fcloseArgs;
@@ -879,7 +975,7 @@ struct BufferMonitor : public ModulePass
                     this->builder->CreateCall(setHighestAccessedByteFunction, { bufferBufferNodeTy, accessedBytes });
 
                     // Write BufferNode data to file
-                    this->builder->CreateCall(writeToFileFunction, { bufferBufferNodeTy, accessedBytes });
+                    // this->builder->CreateCall(writeToFileFunction, { bufferBufferNodeTy, accessedBytes });
                 
                 }
             } 

@@ -786,9 +786,6 @@ struct BufferMonitor : public ModulePass
             builder->CreateCall(this->printBufferListFunction);
         #endif
 
-        this->builder->CreateCall(this->printBufferListFunction);
-        this->builder->CreateCall(this->writeBufferListToFileFunction);
-
         // Close file
         std::vector<Type*> fcloseArgs;
         fcloseArgs.push_back(PointerType::getUnqual(Type::getInt8Ty(context))); // FILE* argument
@@ -975,14 +972,14 @@ struct BufferMonitor : public ModulePass
                     // Get pointer type of BufferNode* using the default address space (0)
                     PointerType* bufferNodePtrType = PointerType::get(BufferNodeTy, 0); 
                     // Cast the return type of the getBufferFunction (CallInst) to BufferNode*
-                    Value* bufferBufferNode = builder->CreateBitCast(buffer, bufferNodePtrType, "BufferNodePtr");
+                    Value* bufferNode = builder->CreateBitCast(buffer, bufferNodePtrType, "BufferNodePtr");
 
                     // Update the highest accessed byte of the buffer node if the currently accessed byte is greater then
                     // the highest accessed byte of the buffer node
-                    this->builder->CreateCall(setHighestAccessedByteFunction, { bufferBufferNode, accessedBytes });
+                    this->builder->CreateCall(setHighestAccessedByteFunction, { bufferNode, accessedBytes });
 
                     // Write BufferNode data to file
-                    // this->builder->CreateCall(writeToFileFunction, { bufferBufferNodeTy, accessedBytes });
+                    this->builder->CreateCall(writeToFileFunction, { bufferNode, accessedBytes });
                 
                 }
             } 
@@ -1006,7 +1003,7 @@ static void registerBufferMonitorPass(const PassManagerBuilder &,
 
 // Run BufferMonitor at the end of the optimization pipeline
 static RegisterStandardPasses RegisterBufferMonitorPass(
-    PassManagerBuilder::EP_OptimizerLast, registerBufferMonitorPass);
+    PassManagerBuilder::EP_ModuleOptimizerEarly, registerBufferMonitorPass);
 
 // Also run BufferMonitor when optimizations are turned off (-O0)
 static RegisterStandardPasses RegisterBufferMonitorPass0(

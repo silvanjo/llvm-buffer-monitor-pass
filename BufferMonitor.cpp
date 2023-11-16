@@ -66,6 +66,7 @@ struct BufferMonitor : public ModulePass
     std::unique_ptr<IRBuilder<>> builder;
 
     Function* fopenFunc;
+    Function* fcloseFunc;
     Function* mallocFunc;
     Function* fprintfFunc;
     Function* mainFunction;
@@ -80,10 +81,6 @@ struct BufferMonitor : public ModulePass
 
     Value* mode;
     Value* filename;
-    Value* file_ptr;
-
-    // Globals
-    GlobalVariable* globalFilePtr;
 
     // Functions to be skipped
     std::set<Function*> skipFunctions;
@@ -156,24 +153,17 @@ struct BufferMonitor : public ModulePass
             printfFunction = Function::Create(printfFunctionType, Function::ExternalLinkage, "printf", module);
         }
 
-        // Create Global Variable for file pointer
-        this->globalFilePtr = module->getGlobalVariable("globalFilePtr");
-        if (!this->globalFilePtr)
-        {
-            this->globalFilePtr = new GlobalVariable(
-                *module,
-                Type::getInt8PtrTy(context),
-                false,
-                GlobalVariable::ExternalLinkage,
-                Constant::getNullValue(Type::getInt8PtrTy(context)),
-                "globalFilePtr"
-            );
-        }
-
         // Get or insert fopen function for file IO
         FunctionType* FT = FunctionType::get(Type::getInt8PtrTy(context), { Type::getInt8PtrTy(context), Type::getInt8PtrTy(context) }, false);
         FunctionCallee fopenFuncCallee = module->getOrInsertFunction("fopen", FT);
         fopenFunc = cast<Function>(fopenFuncCallee.getCallee());  
+
+        // Get or insert fclose function for file IO
+        std::vector<Type*> fcloseArgs;
+        fcloseArgs.push_back(PointerType::getUnqual(Type::getInt8Ty(context))); // FILE* argument
+        FunctionType* fcloseType = FunctionType::get(Type::getInt32Ty(context), fcloseArgs, false); 
+        FunctionCallee fcloseFuncCallee = module->getOrInsertFunction("fclose", fcloseType);
+        fcloseFunc = cast<Function>(fcloseFuncCallee.getCallee());
 
         // Get or insert the fprint function for file IO
         FunctionType* fprintfType = FunctionType::get(Type::getInt32Ty(context), { Type::getInt8PtrTy(context), Type::getInt8PtrTy(context) }, true);
@@ -182,11 +172,8 @@ struct BufferMonitor : public ModulePass
 
         // Open the file for writing in the beginning of the main function
         filename = builder->CreateGlobalStringPtr("output.txt");
-        mode = builder->CreateGlobalStringPtr("w");
-        file_ptr = builder->CreateCall(fopenFunc, {filename, mode});
-
-        // Store the file pointer in the global variable
-        builder->CreateStore(file_ptr, globalFilePtr);
+        // Open file in append mode
+        mode = builder->CreateGlobalStringPtr("a");
 
         // Get or insert the malloc function
         mallocFunc = module->getFunction("malloc");
@@ -460,7 +447,10 @@ struct BufferMonitor : public ModulePass
         Value* accessedByte = writeToFileFunction->arg_begin() + 1; 
 
         this->builder->SetInsertPoint(entry);
-    
+
+        // Open file for writing
+        Value* file_ptr_tmp = builder->CreateCall(fopenFunc, { filename, mode });
+
         // Check if the passed buffer node is null
         Value* bufferNodeIsNullptr = this->builder->CreateICmpEQ(buffer, bufferNodeNullptr);  
 
@@ -486,9 +476,13 @@ struct BufferMonitor : public ModulePass
         // Create output string for the file
         std::string outputString = "Buffer address %p; Accessed index %d; Buffer size %d; ID %d; HAB %d\n";
         Value* formatString = this->builder->CreateGlobalStringPtr(outputString.c_str());
-        Value* loadedFilePtr = this->builder->CreateLoad(globalFilePtr->getType()->getPointerElementType(), globalFilePtr);
-        this->builder->CreateCall(fprintfFunc, { loadedFilePtr, formatString, bufferAddress, accessedByte, bufferSize, bufferID, highestAccessedByte });
+
+        // Write to file
+        this->builder->CreateCall(fprintfFunc, { file_ptr_tmp, formatString, bufferAddress, accessedByte, bufferSize, bufferID, highestAccessedByte });
     
+        // Close file after writing to it
+        builder->CreateCall(fcloseFunc, { file_ptr_tmp });
+
         // Jump to the continue block after printf
         this->builder->CreateBr(continueBlockSGE);
 
@@ -557,11 +551,13 @@ struct BufferMonitor : public ModulePass
         Value* bufferSize    = this->builder->CreateLoad(bufferSizePtr, "BufferSize");
        
         // TODO: Write node data to file
+        /*
         std::string outputString = "Buffer address %p; Buffer size %d; ID %d; HAB %d\n";
         Value* formatString = this->builder->CreateGlobalStringPtr(outputString.c_str());
         Value* loadedFilePtr = this->builder->CreateLoad(globalFilePtr->getType()->getPointerElementType(), globalFilePtr);
         this->builder->CreateCall(fprintfFunc, { loadedFilePtr, formatString, bufferAddress, bufferSize, bufferID, highestAccessedByte });
-        
+        */
+
         // Move to next node
         Value *nextNodePtr = this->builder->CreateStructGEP(this->BufferNodeTy, currentNode, 4, "nextNodeAddr");
         Value *nextNode = this->builder->CreateLoad(nextNodePtr->getType()->getPointerElementType(), nextNodePtr, "nextNode");
@@ -786,15 +782,6 @@ struct BufferMonitor : public ModulePass
             builder->CreateCall(this->printBufferListFunction);
         #endif
 
-        // Close file
-        std::vector<Type*> fcloseArgs;
-        fcloseArgs.push_back(PointerType::getUnqual(Type::getInt8Ty(context))); // FILE* argument
-        FunctionType* fcloseType = FunctionType::get(Type::getInt32Ty(context), fcloseArgs, false); 
-        FunctionCallee fcloseFunc = module->getOrInsertFunction("fclose", fcloseType);
-        // Load the file pointer from the global variable
-        Value *loadedFilePtr = builder->CreateLoad(globalFilePtr->getType()->getPointerElementType(), globalFilePtr);
-        builder->CreateCall(fcloseFunc, {loadedFilePtr});
-
         return true;
     }
 
@@ -849,6 +836,7 @@ struct BufferMonitor : public ModulePass
                     InsertBufferToList(bufferAddress, bufferSizeValue);
 
                     // Write size of stack-array to file
+                    /*
                     std::string outputString = "Stack allocation of size: %d\n";
                     Value* formatString = this->builder->CreateGlobalStringPtr(outputString, "fileFormatString", 0, module);
                     // Load the file pointer from the global variable
@@ -856,6 +844,7 @@ struct BufferMonitor : public ModulePass
                     this->builder->CreateCall(fprintfFunc, { loadedFilePtr, formatString, bufferSizeValue });
 
                     DEBUG_PRINT("Allocated array of size " << arraySize << " stored in linked list");
+                    */
                 }    
             }
             
@@ -891,11 +880,13 @@ struct BufferMonitor : public ModulePass
                         InsertBufferToList(bufferAddress, bufferSize);
 
                         // Write size of dynamicallly allocated array to file
+                        /*
                         std::string outputString = "Heap allocation of size: %d\n";
                         Value* formatString = builder->CreateGlobalStringPtr(outputString, "fileFormatString", 0, module);
                         // Load the file pointer from the global variable
                         Value *loadedFilePtr = builder->CreateLoad(globalFilePtr->getType()->getPointerElementType(), globalFilePtr);
                         builder->CreateCall(fprintfFunc, { loadedFilePtr, formatString, bufferSize });
+                        */
                     }
                 }
             }

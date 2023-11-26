@@ -136,7 +136,8 @@ struct BufferMonitor : public ModulePass
         mainFunction = module->getFunction("main");
         if (!mainFunction) 
         {
-            DEBUG_PRINT_WARN("No main function found");
+            std::cout << "No main function" << std::endl;
+            return 1;
         }
 
         // Open the file for writing in the beginning of the main function
@@ -146,29 +147,80 @@ struct BufferMonitor : public ModulePass
         std::vector<Type*> printfArgsTypes;
         printfArgsTypes.push_back(Type::getInt8PtrTy(context));
         FunctionType* printfFunctionType = FunctionType::get(builder->getInt32Ty(), printfArgsTypes, true);
-        
         printfFunction = module->getFunction("printf");
         if (!printfFunction) 
         {
             printfFunction = Function::Create(printfFunctionType, Function::ExternalLinkage, "printf", module);
         }
 
-        // Get or insert fopen function for file IO
-        FunctionType* FT = FunctionType::get(Type::getInt8PtrTy(context), { Type::getInt8PtrTy(context), Type::getInt8PtrTy(context) }, false);
-        FunctionCallee fopenFuncCallee = module->getOrInsertFunction("fopen", FT);
-        fopenFunc = cast<Function>(fopenFuncCallee.getCallee());  
 
-        // Get or insert fclose function for file IO
-        std::vector<Type*> fcloseArgs;
-        fcloseArgs.push_back(PointerType::getUnqual(Type::getInt8Ty(context))); // FILE* argument
-        FunctionType* fcloseType = FunctionType::get(Type::getInt32Ty(context), fcloseArgs, false); 
-        FunctionCallee fcloseFuncCallee = module->getOrInsertFunction("fclose", fcloseType);
-        fcloseFunc = cast<Function>(fcloseFuncCallee.getCallee());
+        // If the compiled LLVM IR file the FILE* object is represented as a structure of type %struct._IO_FILE
+        // We retrieve this type and create a pointer type to it for defining the signature of fopen, fprintf and fclose
+        // This is the case when the target program uses the stdio.h library
+        // Retrieve or create the structure type for %struct._IO_FILE
+        StructType* struct_IO_FILE_Type = StructType::getTypeByName(module->getContext(), "struct._IO_FILE");
 
-        // Get or insert the fprint function for file IO
-        FunctionType* fprintfType = FunctionType::get(Type::getInt32Ty(context), { Type::getInt8PtrTy(context), Type::getInt8PtrTy(context) }, true);
-        FunctionCallee fprintfFuncCallee = module->getOrInsertFunction("fprintf", fprintfType);
-        fprintfFunc = cast<Function>(fprintfFuncCallee.getCallee());
+        // If struct._IO_FILE is defined create a pointer type to it, else create a generic i8* pointer type
+        PointerType* FILE_Ptr_Type = struct_IO_FILE_Type ? PointerType::getUnqual(struct_IO_FILE_Type) : Type::getInt8PtrTy(context);
+
+        // Get or insert the fopen function
+        FunctionType* fopenType = FunctionType::get(FILE_Ptr_Type, { Type::getInt8PtrTy(context), Type::getInt8PtrTy(context) }, false);
+        auto fopenCallee = module->getOrInsertFunction("fopen", fopenType);
+        Constant* fopenConstant = dyn_cast<Constant>(fopenCallee.getCallee());
+
+        Function* fopenFunction = nullptr;
+        if (Function* func = dyn_cast<Function>(fopenConstant)) 
+        {
+            fopenFunction = func;
+        }
+        else if (ConstantExpr* constExpr = dyn_cast<ConstantExpr>(fopenConstant)) 
+        {
+            if (constExpr->isCast() && isa<Function>(constExpr->getOperand(0))) 
+                fopenFunction = dyn_cast<Function>(constExpr->getOperand(0));
+        }
+
+        if (!fopenFunction) 
+        {
+            std::cerr << "Could not get or insert fopen function" << std::endl;
+            return 1;
+        }
+
+        this->fopenFunc = fopenFunction;
+
+        // Get or insert the fclose function
+        std::vector<Type*> fcloseArgs = { FILE_Ptr_Type};
+        FunctionType* fcloseType = FunctionType::get(Type::getInt32Ty(context), fcloseArgs, false);
+        auto fcloseCallee = module->getOrInsertFunction("fclose", fcloseType);
+
+        Function* fcloseFunction = nullptr;
+        if (Function* func = dyn_cast<Function>(fcloseCallee.getCallee())) 
+        {
+            fcloseFunction = func;
+        }
+        else if (ConstantExpr* constExpr = dyn_cast<ConstantExpr>(fcloseCallee.getCallee())) 
+        {
+            if (constExpr->isCast() && isa<Function>(constExpr->getOperand(0))) 
+                fcloseFunction = dyn_cast<Function>(constExpr->getOperand(0));
+        }
+
+        this->fcloseFunc = fcloseFunction;
+
+        // Get or insert the fprintf function
+        FunctionType* fprintfType = FunctionType::get(Type::getInt32Ty(context), { FILE_Ptr_Type, Type::getInt8PtrTy(context) }, true);
+        auto fprintfCallee = module->getOrInsertFunction("fprintf", fprintfType);
+
+        Function* fprintfFunction = nullptr;
+        if (Function* func = dyn_cast<Function>(fprintfCallee.getCallee())) 
+        {
+            fprintfFunction = func;
+        }
+        else if (ConstantExpr* constExpr = dyn_cast<ConstantExpr>(fprintfCallee.getCallee())) 
+        {
+            if (constExpr->isCast() && isa<Function>(constExpr->getOperand(0))) 
+                fprintfFunction = dyn_cast<Function>(constExpr->getOperand(0));
+        }
+
+        this->fprintfFunc = fprintfFunction;
 
         // Open the file for writing in the beginning of the main function
         filename = builder->CreateGlobalStringPtr("output.txt");
@@ -942,11 +994,13 @@ struct BufferMonitor : public ModulePass
                 {
                     // getelementptr instruction has two index values
                     // For arrays with one dimension the first is always zero
+                    /*
                     if (!isMultiDimensionalArray && iteration == 0) 
                     {
                         // Skip the first iteration if the array is not multi-dimensional
                         // continue;
                     }
+                    */
 
                     // Determine accessed byte
                     Value* indexValue = it->get();

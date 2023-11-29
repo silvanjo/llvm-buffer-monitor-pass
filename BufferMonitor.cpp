@@ -69,7 +69,6 @@ struct BufferMonitor : public ModulePass
     Function* fcloseFunc;
     Function* mallocFunc;
     Function* fprintfFunc;
-    Function* mainFunction;
     Function* printfFunction;
 
     // Custom LLVM functions
@@ -114,8 +113,7 @@ struct BufferMonitor : public ModulePass
         // Set the fields for BufferNodeTy
         BufferNodeTy->setBody(BufferNodeFields);
         
-        // Get the global variable BufferListHead
-        // Create it if it does not exist
+        // Get the global variable BufferListHeador create it if it does not exist
         this->BufferListHead = module->getGlobalVariable("BufferListHead");
         if (!this->BufferListHead) 
         {
@@ -126,22 +124,11 @@ struct BufferMonitor : public ModulePass
                 *module,                                                        // Module
                 PointerType::get(BufferNodeTy, 0),                              // Type
                 false,                                                          // isConstant
-                GlobalVariable::ExternalLinkage,                                // Make it available to all modules
+                Function::InternalLinkage,                                // Make it available to all modules
                 ConstantPointerNull::get(PointerType::get(BufferNodeTy, 0)),    // Initializer
                 "BufferListHead"                                                // Name
             );
         }
-
-        // Get main function
-        mainFunction = module->getFunction("main");
-        if (!mainFunction) 
-        {
-            std::cout << "No main function" << std::endl;
-            return 1;
-        }
-
-        // Open the file for writing in the beginning of the main function
-        builder->SetInsertPoint(&mainFunction->getEntryBlock().front());
         
         // Get printf function
         std::vector<Type*> printfArgsTypes;
@@ -222,11 +209,6 @@ struct BufferMonitor : public ModulePass
 
         this->fprintfFunc = fprintfFunction;
 
-        // Open the file for writing in the beginning of the main function
-        filename = builder->CreateGlobalStringPtr("output.txt");
-        // Open file in append mode
-        mode = builder->CreateGlobalStringPtr("a");
-
         // Get or insert the malloc function
         mallocFunc = module->getFunction("malloc");
         if (!mallocFunc) 
@@ -305,6 +287,12 @@ struct BufferMonitor : public ModulePass
     // Creates LLVM function for searching for the buffer with the given ID in the linked list, return null if buffer is not in the list 
     Function* CreateGetBufferFunction()
     {
+        std::string functionName = "getBuffer";
+
+        // Check if the function already exists in the module
+        if (Function *F = this->module->getFunction(functionName)) 
+            return F;
+
         LLVMContext& context = this->module->getContext();
 
         // Get pointer type of BufferNode* using the default address space (0)
@@ -316,8 +304,8 @@ struct BufferMonitor : public ModulePass
                                                         false);
 
         Function* getBufferFunction = Function::Create( functionType, 
-                                                        Function::ExternalLinkage,
-                                                        "getBuffer",
+                                                        Function::InternalLinkage,
+                                                        functionName,
                                                         module);
 
         // Set the name of the arguement
@@ -395,6 +383,12 @@ struct BufferMonitor : public ModulePass
     // This function returns true if value was updated
     Function* CreateSetHighestAccessedByteFunction()
     {
+        std::string functionName = "setHighestAccessedByte";
+
+        // Check if the function already exists in the module
+        if (Function *F = this->module->getFunction(functionName)) 
+            return F;
+
         LLVMContext& context = this->module->getContext();
 
         // Get pointer type of BufferNode* using the default address space (0)
@@ -408,8 +402,8 @@ struct BufferMonitor : public ModulePass
                                                                               false);
 
         Function* setHighestAccessedByteFunction = Function::Create( setHighestAccessedByteFunctionType,
-                                                                      Function::ExternalLinkage,
-                                                                      "setHighestAccessedByte",
+                                                                      Function::InternalLinkage,
+                                                                      functionName,
                                                                       this->module);
         
         BasicBlock* entryBB = BasicBlock::Create(context, "Entry", setHighestAccessedByteFunction);
@@ -470,6 +464,12 @@ struct BufferMonitor : public ModulePass
     // LLVM function that takes a BufferNode* and writes it's data to the file
     Function* CreateWriteToFileFunction()
     {
+        std::string functionName = "writeToFile";
+
+        // Check if the function already exists in the module
+        if (Function *F = this->module->getFunction(functionName)) 
+            return F;
+
         LLVMContext& context = this->module->getContext();
 
         // Get pointer type of BufferNode* using the default address space (0)
@@ -483,8 +483,8 @@ struct BufferMonitor : public ModulePass
                                                                     false);
 
         Function* writeToFileFunction = Function::Create(   writeToFileFunctionType, 
-                                                            Function::ExternalLinkage, 
-                                                            "writeToFile", 
+                                                            Function::InternalLinkage, 
+                                                            functionName, 
                                                             this->module);
 
         BasicBlock* entry = BasicBlock::Create(context, "entry", writeToFileFunction);
@@ -499,6 +499,11 @@ struct BufferMonitor : public ModulePass
         Value* accessedByte = writeToFileFunction->arg_begin() + 1; 
 
         this->builder->SetInsertPoint(entry);
+
+        // Open the file for writing in the beginning of the main function
+        filename = builder->CreateGlobalStringPtr("output.txt");
+        // Open file in append mode
+        mode = builder->CreateGlobalStringPtr("a");
 
         // Open file for writing
         Value* file_ptr_tmp = builder->CreateCall(fopenFunc, { filename, mode });
@@ -548,6 +553,12 @@ struct BufferMonitor : public ModulePass
 
     Function* CreateWriteBufferListToFileFunction()
     {
+        std::string functionName = "writeBufferListToFile";
+
+        // Check if the function already exists in the module
+        if (Function *F = this->module->getFunction(functionName)) 
+            return F;
+
         LLVMContext& context = this->module->getContext();
 
         // Get pointer type of BufferNode* using the default address space (0)
@@ -558,8 +569,8 @@ struct BufferMonitor : public ModulePass
         FunctionType* writeBufferListToFileType = FunctionType::get(Type::getVoidTy(context), false);
 
         Function* writeBufferListToFileFunction = Function::Create( writeBufferListToFileType,
-                                                                    Function::ExternalLinkage,
-                                                                    "writeBufferListToFile",
+                                                                    Function::InternalLinkage,
+                                                                    functionName,
                                                                     this->module);
         
         BasicBlock* entry = BasicBlock::Create(context, "Entry", writeBufferListToFileFunction);
@@ -628,6 +639,12 @@ struct BufferMonitor : public ModulePass
 
     Function* CreatePrintBufferListFunction()
     {
+        std::string functionName = "printBufferList";
+
+        // Check if the function already exists in the module
+        if (Function *F = this->module->getFunction(functionName)) 
+            return F;
+
         LLVMContext& context = this->module->getContext();
 
         // Get pointer type of BufferNode* using the default address space (0)
@@ -639,8 +656,8 @@ struct BufferMonitor : public ModulePass
         FunctionType* printBufferListType = FunctionType::get(Type::getVoidTy(context), false);
         
         Function* printBufferList = Function::Create(   printBufferListType, 
-                                                        Function::ExternalLinkage, 
-                                                        "printBufferList", 
+                                                        Function::InternalLinkage, 
+                                                        functionName, 
                                                         this->module);
 
         // Create the entry basic block
@@ -708,6 +725,7 @@ struct BufferMonitor : public ModulePass
         return printBufferList;
     }
 
+    // TODO: Wrap code in function
     // Insert buffer to linked list
     void InsertBufferToList(Value* bufferAddress, Value* bufferSize)
     {
@@ -812,8 +830,6 @@ struct BufferMonitor : public ModulePass
 
         LLVMContext& context = M.getContext();
 
-        this->builder->SetInsertPoint(&mainFunction->getEntryBlock().front());
-
         // Iterate over all functions in the module
         for (auto& F : M)
         {
@@ -824,15 +840,6 @@ struct BufferMonitor : public ModulePass
             // Process each function of the module
             procesFunction(F);
         }
-
-        // Set insert point to last block of function
-        BasicBlock &LastBlock = mainFunction->back();   
-        builder->SetInsertPoint(LastBlock.getTerminator());
-
-        #ifdef DEBUG
-            // Print the linked list containing all buffers
-            builder->CreateCall(this->printBufferListFunction);
-        #endif
 
         return true;
     }

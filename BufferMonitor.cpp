@@ -226,7 +226,7 @@ struct BufferMonitor : public ModulePass
         {
             DEBUG_PRINT_ERROR("getBufferFuntion Function verification failed after transformations!");
             #ifdef DEBUG
-                this->getBufferFunction->dump();
+                // this->getBufferFunction->dump();
             #endif
         }
 
@@ -238,7 +238,7 @@ struct BufferMonitor : public ModulePass
         {
             DEBUG_PRINT_ERROR("printBufferListFunction function verification failed after transformations!");
             #ifdef DEBUG
-                this->printBufferListFunction->dump();
+                // this->printBufferListFunction->dump();
             #endif
         }
 
@@ -249,7 +249,7 @@ struct BufferMonitor : public ModulePass
         {
             DEBUG_PRINT_ERROR("printBufferListFunction function verification failed after transformations!");
             #ifdef DEBUG
-                this->setHighestAccessedByteFunction->dump();
+                // this->setHighestAccessedByteFunction->dump();
             #endif
         }
 
@@ -260,7 +260,7 @@ struct BufferMonitor : public ModulePass
         {
             DEBUG_PRINT_ERROR("writeToFileFunction function verification failed after transformations!");
             #ifdef DEBUG
-                this->writeToFileFunction->dump();
+                // this->writeToFileFunction->dump();
             #endif
         }
 
@@ -270,7 +270,7 @@ struct BufferMonitor : public ModulePass
         {
             DEBUG_PRINT_ERROR("writeBufferListToFileFunction function verification failed after transformations!");
             #ifdef DEBUG
-                this->writeToFileFunction->dump();
+                // this->writeToFileFunction->dump();
             #endif
         }
 
@@ -488,9 +488,8 @@ struct BufferMonitor : public ModulePass
                                                             this->module);
 
         BasicBlock* entry = BasicBlock::Create(context, "entry", writeToFileFunction);
-        // Create a basic block for the printf call
+        BasicBlock* accessedByteIsNotZero = BasicBlock::Create(context, "accessedByteIsNotZero", writeToFileFunction);
         BasicBlock* thenBlockSGE = BasicBlock::Create(context, "then_buffer_found", writeToFileFunction);
-        // Create a basic block for continuation after printf
         BasicBlock* continueBlockSGE = BasicBlock::Create(context, "continue_buffer_not_found", writeToFileFunction);
 
         // Get buffer from argument list
@@ -500,13 +499,18 @@ struct BufferMonitor : public ModulePass
 
         this->builder->SetInsertPoint(entry);
 
-        // Open the file for writing in the beginning of the main function
-        filename = builder->CreateGlobalStringPtr("output.txt");
-        // Open file in append mode
-        mode = builder->CreateGlobalStringPtr("a");
+        /*
+            We only write to the file if the accessed byte it not zero to reduce unnecessary file I/O
+        */
 
-        // Open file for writing
-        Value* file_ptr_tmp = builder->CreateCall(fopenFunc, { filename, mode });
+        // Get zero value to check against the accessedBytes variable
+        Value* zeroValue = Constant::getNullValue(accessedByte->getType());
+        // Check if the accessed byte is zero
+        Value* accessedByteIsZero = this->builder->CreateICmpEQ(accessedByte, zeroValue, "accessedByteIsZero");
+        // Create a conditional branch
+        this->builder->CreateCondBr(accessedByteIsZero, continueBlockSGE, accessedByteIsNotZero);
+
+        this->builder->SetInsertPoint(accessedByteIsNotZero);
 
         // Check if the passed buffer node is null
         Value* bufferNodeIsNullptr = this->builder->CreateICmpEQ(buffer, bufferNodeNullptr);  
@@ -516,6 +520,14 @@ struct BufferMonitor : public ModulePass
 
         // Insert printf inside thenBlock
         this->builder->SetInsertPoint(thenBlockSGE);
+
+        // Open the file for writing in the beginning of the main function
+        filename = builder->CreateGlobalStringPtr("output.txt");
+        // Open file in append mode
+        mode = builder->CreateGlobalStringPtr("a");
+
+        // Open file for writing
+        Value* file_ptr_tmp = builder->CreateCall(fopenFunc, { filename, mode });
 
         // Get the elements of the buffer node
         Value* bufferIDPtr = this->builder->CreateStructGEP(BufferNodeTy, buffer, 0);
@@ -868,7 +880,7 @@ struct BufferMonitor : public ModulePass
                 {
                     DEBUG_PRINT("Found a static allocation");
                     #ifdef DEBUG
-                        allocaInst->dump();
+                        // allocaInst->dump();
                     #endif
 
                     // Determine the size of the array in bytes
@@ -955,7 +967,7 @@ struct BufferMonitor : public ModulePass
                 // This is a getelementptr instruction, a buffer is being accessed here
                 DEBUG_PRINT("Found a getelementptr instruction");
                 #ifdef DEBUG
-                    gepInst->dump();
+                    // gepInst->dump();
                 #endif
 
                 builder->SetInsertPoint(&*I);
@@ -976,8 +988,8 @@ struct BufferMonitor : public ModulePass
                     
                     // Print type of the base pointer
                     #ifdef DEBUG
-                        baseType->dump();
-                        errs() << "\n"; 
+                        // baseType->dump();
+                        // errs() << "\n"; 
                     #endif
 
                     if (ArrayType* arrayType = dyn_cast<ArrayType>(baseType))

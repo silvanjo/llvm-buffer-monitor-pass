@@ -1,14 +1,20 @@
 #include <stdio.h>
-#include <stdlib.h>
+#include <string.h>
+#include <sys/ipc.h>
+#include <sys/shm.h>
 
-extern FILE* __file_;
+extern char* __shared_memory_;
 
 __attribute__((destructor)) void my_teardown_function(void) 
 {
-  printf("Closing file.\n");
+  char value = __shared_memory_[0];
+  printf("Destructor: %d\n", value);
 
-  // Close the file
-  fclose(__file_);
+  // Detach shared memory
+  if (shmdt(__shared_memory_) == -1) {
+    perror("shmdt");
+    return;
+  }
 
-  printf("File closed.\n");
+  printf("Detach shared memory: succes\n");
 }

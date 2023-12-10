@@ -18,13 +18,7 @@
 #include <set>
 #include <string>
 #include <cstdint>
-#include <stdio.h>
 #include <iostream>
-#include <sys/ipc.h>
-#include <sys/shm.h>
-
-
-#define SHM_SIZE 1024 // 1KB
 
 // Print on console only when in debug mode
 #ifdef DEBUG
@@ -66,28 +60,19 @@ struct BufferMonitor : public ModulePass
     // Head of the linked list storing address and size of dynamically allocated buffers
     StructType* BufferNodeTy;
     GlobalVariable* BufferListHead; 
-    GlobalVariable* __file_FileDescritor;
+
+    GlobalVariable* sharedMemory; 
 
     Module* module;
 
     std::unique_ptr<IRBuilder<>> builder;
 
-    Function* fopenFunc;
-    Function* fcloseFunc;
     Function* mallocFunc;
-    Function* fprintfFunc;
-
-    // Functions for shared memory
-    Function* shmgetFunc;
-    Function* shmatFunc;
-    Function* shmdtFunc;
 
     // Custom LLVM functions
     Function* getBufferFunction;
-    Function* writeToFileFunction;
-    Function* printBufferListFunction;
-    Function* writeBufferListToFileFunction;
     Function* setHighestAccessedByteFunction;
+    Function* writeGEPToSharedMemoryFunction;
 
     Value* mode;
     Value* filename;
@@ -135,199 +120,17 @@ struct BufferMonitor : public ModulePass
                 *module,                                                        // Module
                 PointerType::get(BufferNodeTy, 0),                              // Type
                 false,                                                          // isConstant
-                Function::InternalLinkage,                                // Make it available to all modules
+                Function::InternalLinkage,                                      // Make it available to all modules
                 ConstantPointerNull::get(PointerType::get(BufferNodeTy, 0)),    // Initializer
                 "BufferListHead"                                                // Name
             );
         }
 
-        // Get global file descriptor for the output file created in constructor.c
-        __file_FileDescritor = 
-            new GlobalVariable(*module, PointerType::get(IntegerType::getInt8Ty(context), 0), false,
-                                                                    GlobalValue::ExternalLinkage, 0, "__file_");
-
-        /*
-            Create shared memory location for communication with fuzzer
-        */
-
-        // Insert shmget function for creating shared memory location
-        // prototype: int shmget(key_t key, size_t size, int shmflg);
-        FunctionType *shmgetType = FunctionType::get( IntegerType::getInt32Ty(context), 
-                                                    { IntegerType::getInt32Ty(context), 
-                                                      IntegerType::getInt64Ty(context), 
-                                                      IntegerType::getInt32Ty(context) }, 
-                                                      false);
-
-        auto shmgetCallee = module->getOrInsertFunction("shmget", shmgetType);
-        Constant* shmgetConstant = dyn_cast<Constant>(shmgetCallee.getCallee());
-
-        Function* shmgetFunction = nullptr;
-        if (Function* func = dyn_cast<Function>(shmgetConstant)) 
-        {
-            shmgetFunction = func;
-        }
-        else if (ConstantExpr* constExpr = dyn_cast<ConstantExpr>(shmgetConstant)) 
-        {
-            if (constExpr->isCast() && isa<Function>(constExpr->getOperand(0))) 
-                shmgetFunction = dyn_cast<Function>(constExpr->getOperand(0));
-        }
-
-        if (!shmgetFunction) 
-        {
-            std::cerr << "Could not get or insert shmget function" << std::endl;
-            return 1;
-        }
-
-        // Insert shmat function for attaching shared memory location
-        // prototype: void *shmat(int shmid, const void *shmaddr, int shmflg);
-        FunctionType *shmatType = FunctionType::get( PointerType::get(Type::getInt8Ty(context), 0), 
-                                                    { IntegerType::getInt32Ty(context), 
-                                                      PointerType::get(Type::getInt8Ty(context), 0), 
-                                                      IntegerType::getInt32Ty(context) }, 
-                                                      false);
-
-        auto shmatCallee = module->getOrInsertFunction("shmat", shmatType);
-        Constant* shmatConstant = dyn_cast<Constant>(shmatCallee.getCallee());
-
-        Function* shmatFunction = nullptr;
-        if (Function* func = dyn_cast<Function>(shmatConstant)) 
-        {
-            shmatFunction = func;
-        }
-        else if (ConstantExpr* constExpr = dyn_cast<ConstantExpr>(shmatConstant)) 
-        {
-            if (constExpr->isCast() && isa<Function>(constExpr->getOperand(0))) 
-                shmatFunction = dyn_cast<Function>(constExpr->getOperand(0));
-        }
-
-        if (!shmatFunction) 
-        {
-            std::cerr << "Could not get or insert shmat function" << std::endl;
-            return 1;
-        }
-
-        // Insert shmdt function for controlling shared memory location
-        // prototype: int shmdt(const void *shmaddr);
-        FunctionType *shmdtType = FunctionType::get( IntegerType::getInt32Ty(context), 
-                                                    { PointerType::get(Type::getInt8Ty(context), 0) }, 
-                                                    false);
-
-        auto shmdtCallee = module->getOrInsertFunction("shmdt", shmdtType);
-        Constant* shmdtConstant = dyn_cast<Constant>(shmdtCallee.getCallee());
-
-        Function* shmdtFunction = nullptr;
-        if (Function* func = dyn_cast<Function>(shmdtConstant)) 
-        {
-            shmdtFunction = func;
-        }
-        else if (ConstantExpr* constExpr = dyn_cast<ConstantExpr>(shmdtConstant)) 
-        {
-            if (constExpr->isCast() && isa<Function>(constExpr->getOperand(0))) 
-                shmdtFunction = dyn_cast<Function>(constExpr->getOperand(0));
-        }
-
-        if (!shmdtFunction) 
-        {
-            std::cerr << "Could not get or insert shmdt function" << std::endl;
-            return 1;
-        }
-
-        /*
-        
-        // Create shared memory location with shmget
-        key_t key = 1234;
-        Value* shmgetArg1 = ConstantInt::get(IntegerType::getInt32Ty(context), key);
-        Value* shmgetArg2 = ConstantInt::get(IntegerType::getInt64Ty(context), SHM_SIZE);
-        Value* shmgetArg3 = ConstantInt::get(IntegerType::getInt32Ty(context), 0666 | IPC_CREAT);
-        Value* shmid = builder->CreateCall(shmgetFunction, { shmgetArg1, shmgetArg2, shmgetArg3 });
-
-        // Attach shared memory location with shmat
-        Value* shmatArg1 = shmid;
-        Value* shmatArg2 = ConstantPointerNull::get(PointerType::get(Type::getInt8Ty(context), 0));
-        Value* shmatArg3 = ConstantInt::get(IntegerType::getInt32Ty(context), 0);
-        Value* shmat = builder->CreateCall(shmatFunction, { shmatArg1, shmatArg2, shmatArg3 });
-
-        // Write 1 to shared memory location
-        Value* sharedMemoryDataPtr = builder->CreatePointerCast(shmat, PointerType::get(IntegerType::getInt32Ty(context), 0));
-        Value* sharedMemoryDataValue = ConstantInt::get(IntegerType::getInt32Ty(context), 1);
-        builder->CreateStore(sharedMemoryDataValue, sharedMemoryDataPtr);
-
-        // Detach shared memory location with shmdt
-        Value* shmdtArg1 = shmid;
-        builder->CreateCall(shmdtFunction, { shmdtArg1 });
-
-        */
-
-        // If the compiled LLVM IR file the FILE* object is represented as a structure of type %struct._IO_FILE
-        // We retrieve this type and create a pointer type to it for defining the signature of fopen, fprintf and fclose
-        // This is the case when the target program uses the stdio.h library
-        // Retrieve or create the structure type for %struct._IO_FILE
-        StructType* struct_IO_FILE_Type = StructType::getTypeByName(module->getContext(), "struct._IO_FILE");
-
-        // If struct._IO_FILE is defined create a pointer type to it, else create a generic i8* pointer type
-        PointerType* FILE_Ptr_Type = struct_IO_FILE_Type ? PointerType::getUnqual(struct_IO_FILE_Type) : Type::getInt8PtrTy(context);
-
-        // Get or insert the fopen function
-        FunctionType* fopenType = FunctionType::get(FILE_Ptr_Type, { Type::getInt8PtrTy(context), Type::getInt8PtrTy(context) }, false);
-        auto fopenCallee = module->getOrInsertFunction("fopen", fopenType);
-        Constant* fopenConstant = dyn_cast<Constant>(fopenCallee.getCallee());
-
-        Function* fopenFunction = nullptr;
-        if (Function* func = dyn_cast<Function>(fopenConstant)) 
-        {
-            fopenFunction = func;
-        }
-        else if (ConstantExpr* constExpr = dyn_cast<ConstantExpr>(fopenConstant)) 
-        {
-            if (constExpr->isCast() && isa<Function>(constExpr->getOperand(0))) 
-                fopenFunction = dyn_cast<Function>(constExpr->getOperand(0));
-        }
-
-        if (!fopenFunction) 
-        {
-            std::cerr << "Could not get or insert fopen function" << std::endl;
-            return 1;
-        }
-
-        this->fopenFunc = fopenFunction;
-
-        // Get or insert the fclose function
-        std::vector<Type*> fcloseArgs = { FILE_Ptr_Type};
-        FunctionType* fcloseType = FunctionType::get(Type::getInt32Ty(context), fcloseArgs, false);
-        auto fcloseCallee = module->getOrInsertFunction("fclose", fcloseType);
-
-        Function* fcloseFunction = nullptr;
-        if (Function* func = dyn_cast<Function>(fcloseCallee.getCallee())) 
-        {
-            fcloseFunction = func;
-        }
-        else if (ConstantExpr* constExpr = dyn_cast<ConstantExpr>(fcloseCallee.getCallee())) 
-        {
-            if (constExpr->isCast() && isa<Function>(constExpr->getOperand(0))) 
-                fcloseFunction = dyn_cast<Function>(constExpr->getOperand(0));
-        }
-
-        this->fcloseFunc = fcloseFunction;
-
-        // Get or insert the fprintf function
-        FunctionType* fprintfType = FunctionType::get(Type::getInt32Ty(context), { FILE_Ptr_Type, Type::getInt8PtrTy(context) }, true);
-        auto fprintfCallee = module->getOrInsertFunction("fprintf", fprintfType);
-
-        Function* fprintfFunction = nullptr;
-        if (Function* func = dyn_cast<Function>(fprintfCallee.getCallee())) 
-        {
-            fprintfFunction = func;
-        }
-        else if (ConstantExpr* constExpr = dyn_cast<ConstantExpr>(fprintfCallee.getCallee())) 
-        {
-            if (constExpr->isCast() && isa<Function>(constExpr->getOperand(0))) 
-                fprintfFunction = dyn_cast<Function>(constExpr->getOperand(0));
-        }
-
-        this->fprintfFunc = fprintfFunction;
+        // Get shared memory location created in constructor.c for writing buffer data
+        this->sharedMemory = new GlobalVariable(*module, PointerType::get(IntegerType::getInt8Ty(context), 0), false,
+                                                        GlobalValue::ExternalLinkage, 0, "__shared_memory_");
 
         // Get or insert the malloc function
-        // TODO: possible error when the target program uses malloc?
         mallocFunc = module->getFunction("malloc");
         if (!mallocFunc) 
         {
@@ -348,18 +151,6 @@ struct BufferMonitor : public ModulePass
             #endif
         }
 
-        // Create the printBufferList function
-        this->printBufferListFunction = CreatePrintBufferListFunction();
-
-        // Check if function is correct after transformations
-        if (verifyFunction(*this->printBufferListFunction, &llvm::errs())) 
-        {
-            DEBUG_PRINT_ERROR("printBufferListFunction function verification failed after transformations!");
-            #ifdef DEBUG
-                // this->printBufferListFunction->dump();
-            #endif
-        }
-
         this->setHighestAccessedByteFunction = CreateSetHighestAccessedByteFunction();
 
         // Check if function is correct after transformations
@@ -371,32 +162,8 @@ struct BufferMonitor : public ModulePass
             #endif
         }
 
-        // Create the writeToFile function
-        this->writeToFileFunction = CreateWriteToFileFunction();
-
-        if (verifyFunction(*this->writeToFileFunction, &llvm::errs())) 
-        {
-            DEBUG_PRINT_ERROR("writeToFileFunction function verification failed after transformations!");
-            #ifdef DEBUG
-                // this->writeToFileFunction->dump();
-            #endif
-        }
-
-        this->writeBufferListToFileFunction = CreateWriteBufferListToFileFunction();
-
-        if (verifyFunction(*this->writeBufferListToFileFunction, &llvm::errs()))
-        {
-            DEBUG_PRINT_ERROR("writeBufferListToFileFunction function verification failed after transformations!");
-            #ifdef DEBUG
-                // this->writeToFileFunction->dump();
-            #endif
-        }
-
         // Add functions to skip
         skipFunctions.insert(this->getBufferFunction);
-        skipFunctions.insert(this->writeToFileFunction);
-        skipFunctions.insert(this->printBufferListFunction);
-        skipFunctions.insert(this->writeBufferListToFileFunction);
         skipFunctions.insert(this->setHighestAccessedByteFunction);
 
         return true;
@@ -579,6 +346,33 @@ struct BufferMonitor : public ModulePass
         return setHighestAccessedByteFunction;
     }
 
+    Function* CreateWriteGEPToSharedMemoryFunction()
+    {
+        std::string functionName = "writeBufferToSharedMemory";
+
+        // Check if the function already exists in the module
+        if (Function *F = this->module->getFunction(functionName)) 
+            return F;
+
+        LLVMContext& context = this->module->getContext();
+
+        // Get pointer type of BufferNode* using the default address space (0)
+        PointerType* bufferNodePtrType = PointerType::get(BufferNodeTy, 0);
+        // Get nullptr of type BufferNotTy
+        Constant* bufferNodeNullptr = ConstantPointerNull::get(bufferNodePtrType);
+
+        // Specify the function type of writeGEPToSharedMemoryFunction
+        FunctionType* writeToFileFunctionType = FunctionType::get(  Type::getVoidTy(context), 
+                                                                    {bufferNodePtrType, Type::getInt64Ty(context)}, 
+                                                                    false);
+
+        Function* writeGEPToSharedMemoryFunction = Function::Create(writeToFileFunctionType, 
+                                                                    Function::InternalLinkage, 
+                                                                    functionName, 
+                                                                    this->module);
+    }
+
+    /*
     // LLVM function that takes a BufferNode* and writes it's data to the file
     Function* CreateWriteToFileFunction()
     {
@@ -617,10 +411,6 @@ struct BufferMonitor : public ModulePass
 
         this->builder->SetInsertPoint(entry);
 
-        /*
-            We only write to the file if the accessed byte it not zero to reduce unnecessary file I/O
-        */
-
         // Get zero value to check against the accessedBytes variable
         Value* zeroValue = Constant::getNullValue(accessedByte->getType());
         // Check if the accessed byte is zero
@@ -639,7 +429,6 @@ struct BufferMonitor : public ModulePass
         // Insert printf inside thenBlock
         this->builder->SetInsertPoint(thenBlockSGE);
 
-        /*
         // Open the file for writing in the beginning of the main function
         filename = builder->CreateGlobalStringPtr("output.txt");
         // Open file in append mode
@@ -647,7 +436,6 @@ struct BufferMonitor : public ModulePass
 
         // Open file for writing
         Value* file_ptr_tmp = builder->CreateCall(fopenFunc, { filename, mode });
-        */
 
         // Get the elements of the buffer node
         Value* bufferIDPtr = this->builder->CreateStructGEP(BufferNodeTy, buffer, 0);
@@ -667,12 +455,10 @@ struct BufferMonitor : public ModulePass
         Value* formatString = this->builder->CreateGlobalStringPtr(outputString.c_str());
 
         // Write to file
-        this->builder->CreateCall(fprintfFunc, { __file_FileDescritor, formatString, bufferAddress, accessedByte, bufferSize, bufferID, highestAccessedByte });
+        this->builder->CreateCall(fprintfFunc, { file_ptr_tmp, formatString, bufferAddress, accessedByte, bufferSize, bufferID, highestAccessedByte });
     
-        /*
         // Close file after writing to it
         builder->CreateCall(fcloseFunc, { file_ptr_tmp });
-        */
 
         // Jump to the continue block after printf
         this->builder->CreateBr(continueBlockSGE);
@@ -684,191 +470,7 @@ struct BufferMonitor : public ModulePass
 
         return writeToFileFunction;
     }
-
-    Function* CreateWriteBufferListToFileFunction()
-    {
-        std::string functionName = "writeBufferListToFile";
-
-        // Check if the function already exists in the module
-        if (Function *F = this->module->getFunction(functionName)) 
-            return F;
-
-        LLVMContext& context = this->module->getContext();
-
-        // Get pointer type of BufferNode* using the default address space (0)
-        PointerType* bufferNodePtrType = PointerType::get(BufferNodeTy, 0); 
-        // Get nullptr of type BufferNotTy
-        Constant* bufferNodeNullptr = ConstantPointerNull::get(bufferNodePtrType);
-
-        FunctionType* writeBufferListToFileType = FunctionType::get(Type::getVoidTy(context), false);
-
-        Function* writeBufferListToFileFunction = Function::Create( writeBufferListToFileType,
-                                                                    Function::InternalLinkage,
-                                                                    functionName,
-                                                                    this->module);
-        
-        BasicBlock* entry = BasicBlock::Create(context, "Entry", writeBufferListToFileFunction);
-        BasicBlock* checkIfHeadIsNull = BasicBlock::Create(context, "LoopBody", writeBufferListToFileFunction);
-        BasicBlock* loopBody = BasicBlock::Create(context, "LoopBody", writeBufferListToFileFunction);
-        BasicBlock* exit = BasicBlock::Create(context, "Exit", writeBufferListToFileFunction);
-
-        this->builder->SetInsertPoint(entry);
-
-        // Load the head of the buffer list
-        GlobalVariable* bufferListHead = this->module->getNamedGlobal("BufferListHead");
-        Value* head = this->builder->CreateLoad(bufferListHead->getType()->getPointerElementType(), bufferListHead, "head");
-
-        // Create an alloca instruction to store the current node
-        AllocaInst* currentNodeAlloca = this->builder->CreateAlloca(head->getType(), 0, "currentNodeAlloca");
-        this->builder->CreateStore(head, currentNodeAlloca);
-
-        this->builder->CreateBr(checkIfHeadIsNull); 
-        
-        this->builder->SetInsertPoint(checkIfHeadIsNull);
-
-        // Check if head node is null 
-        Value* headIsNull = this->builder->CreateICmpEQ(head, bufferNodeNullptr); 
-        this->builder->CreateCondBr(headIsNull, exit, loopBody);
-
-        this->builder->SetInsertPoint(loopBody);
-
-        Value* currentNode = this->builder->CreateLoad(currentNodeAlloca->getType()->getPointerElementType(), currentNodeAlloca, "current");
-
-        // Fetch data from BufferNode
-        Value* bufferIDPtr = this->builder->CreateStructGEP(BufferNodeTy, currentNode, 0);
-        Value* bufferID    = this->builder->CreateLoad(bufferIDPtr, "BufferID");
-
-        Value* highestAccessedBytePtr = this->builder->CreateStructGEP(BufferNodeTy, currentNode, 1);
-        Value* highestAccessedByte    = this->builder->CreateLoad(highestAccessedBytePtr, "HighestByte");
-
-        Value* bufferAddressPtr = this->builder->CreateStructGEP(BufferNodeTy, currentNode, 2);
-        Value* bufferAddress    = this->builder->CreateLoad(bufferAddressPtr, "BufferAddress");
-
-        Value* bufferSizePtr = this->builder->CreateStructGEP(BufferNodeTy, currentNode, 3); 
-        Value* bufferSize    = this->builder->CreateLoad(bufferSizePtr, "BufferSize");
-       
-        // TODO: Write node data to file
-        /*
-        std::string outputString = "Buffer address %p; Buffer size %d; ID %d; HAB %d\n";
-        Value* formatString = this->builder->CreateGlobalStringPtr(outputString.c_str());
-        Value* loadedFilePtr = this->builder->CreateLoad(globalFilePtr->getType()->getPointerElementType(), globalFilePtr);
-        this->builder->CreateCall(fprintfFunc, { loadedFilePtr, formatString, bufferAddress, bufferSize, bufferID, highestAccessedByte });
-        */
-
-        // Move to next node
-        Value *nextNodePtr = this->builder->CreateStructGEP(this->BufferNodeTy, currentNode, 4, "nextNodeAddr");
-        Value *nextNode = this->builder->CreateLoad(nextNodePtr->getType()->getPointerElementType(), nextNodePtr, "nextNode");
-        this->builder->CreateStore(nextNode, currentNodeAlloca);
-
-        // Check if node is null (end of list)
-        Value* isEnd = this->builder->CreateICmpEQ(nextNode, bufferNodeNullptr, "isEnd");
-        this->builder->CreateCondBr(isEnd, exit, loopBody);
-
-        // Create the exit basic block and return instruction
-        this->builder->SetInsertPoint(exit);
-        this->builder->CreateRetVoid();
-
-        return writeBufferListToFileFunction;   
-    }
-
-    Function* CreatePrintBufferListFunction()
-    {
-        std::string functionName = "printBufferList";
-
-        // Check if the function already exists in the module
-        if (Function *F = this->module->getFunction(functionName)) 
-            return F;
-
-        LLVMContext& context = this->module->getContext();
-
-        // Get printf function
-        std::vector<Type*> printfArgsTypes;
-        printfArgsTypes.push_back(Type::getInt8PtrTy(context));
-        FunctionType* printfFunctionType = FunctionType::get(builder->getInt32Ty(), printfArgsTypes, true);
-        Function* printfFunction = module->getFunction("printf");
-        if (!printfFunction) 
-        {
-            printfFunction = Function::Create(printfFunctionType, Function::ExternalLinkage, "printf", module);
-        }
-
-
-        // Get pointer type of BufferNode* using the default address space (0)
-        PointerType* bufferNodePtrType = PointerType::get(BufferNodeTy, 0); 
-        // Get nullptr of type BufferNotTy
-        Constant* bufferNodeNullptr = ConstantPointerNull::get(bufferNodePtrType);
-
-        // Create the printBufferList function
-        FunctionType* printBufferListType = FunctionType::get(Type::getVoidTy(context), false);
-        
-        Function* printBufferList = Function::Create(   printBufferListType, 
-                                                        Function::InternalLinkage, 
-                                                        functionName, 
-                                                        this->module);
-
-        // Create the entry basic block
-        BasicBlock *entry = BasicBlock::Create(context, "entry", printBufferList);
-        // Create BasicBlocks for loop condition, loop body, and exit blocks
-        BasicBlock* checkIfHeadIsNull = BasicBlock::Create(context, "checkIfHeadIsNull", printBufferList);
-        BasicBlock* loopBody = BasicBlock::Create(context, "loopBody", printBufferList);
-        BasicBlock* exit = BasicBlock::Create(context, "exit", printBufferList);
-
-        builder->SetInsertPoint(entry);
-
-        // Load BufferListHead
-        GlobalVariable* bufferListHead = this->module->getNamedGlobal("BufferListHead");
-        Value* head = this->builder->CreateLoad(bufferListHead->getType()->getPointerElementType(), bufferListHead, "head");
-
-        // Create an alloca instruction to store the current node
-        AllocaInst* currentNodeAlloca = builder->CreateAlloca(head->getType(), 0, "currentNode");
-        builder->CreateStore(head, currentNodeAlloca);
-
-        builder->CreateBr(checkIfHeadIsNull);
-
-        builder->SetInsertPoint(checkIfHeadIsNull);
-
-        Value* headIsNull = this->builder->CreateICmpEQ(head, bufferNodeNullptr, "isEnd");
-        this->builder->CreateCondBr(headIsNull, exit, loopBody);
-
-        this->builder->SetInsertPoint(loopBody);
-
-        // Load the current node from memory
-        Value* current = this->builder->CreateLoad(currentNodeAlloca->getType()->getPointerElementType(), currentNodeAlloca, "current");
-
-        // Fetch the data from the buffer node
-        Value *dataPtr = this->builder->CreateStructGEP(this->BufferNodeTy, current, 2, "dataPtr");
-        Value *data = this->builder->CreateLoad(dataPtr->getType()->getPointerElementType(), dataPtr, "data");
-        
-        // Print buffer address
-        std::string formatAddrString = "%p\n";
-        Value* formatAddrStringGlobal = builder->CreateGlobalStringPtr(formatAddrString, "formatAddrString", 0, module);
-        this->builder->CreateCall(printfFunction, {formatAddrStringGlobal, data});
-
-        // Fetch the dataSize 
-        Value *dataSizePtr = builder->CreateStructGEP(this->BufferNodeTy, current, 3, "dataSizePtr");
-        Value *dataSize = builder->CreateLoad(dataSizePtr->getType()->getPointerElementType(), dataSizePtr, "dataSize");
-        
-        // print bufferSize
-        std::string formatSizeString = "Size: %ld\n";
-        Value* formatSizeStringGlobal = builder->CreateGlobalStringPtr(formatSizeString, "formatSizeString", 0, module);
-        builder->CreateCall(printfFunction, {formatSizeStringGlobal, dataSize});
-
-        // Move to next node
-        Value *nextNodePtr = this->builder->CreateStructGEP(this->BufferNodeTy, current, 4, "nextNodeAddr");
-        Value *nextNode = this->builder->CreateLoad(nextNodePtr->getType()->getPointerElementType(), nextNodePtr, "nextNode");
-
-        // Store nextNode to access is it in the next iteration
-        builder->CreateStore(nextNode, currentNodeAlloca);
-
-        // Check if node is null (end of list)
-        Value* isEnd = this->builder->CreateICmpEQ(nextNode, bufferNodeNullptr, "isEnd");
-        this->builder->CreateCondBr(isEnd, exit, loopBody);
-
-        // Create the exit basic block and return instruction
-        builder->SetInsertPoint(exit);
-        builder->CreateRetVoid();
-
-        return printBufferList;
-    }
+    */
 
     // TODO: Wrap code in function
     // Insert buffer to linked list
@@ -1027,9 +629,6 @@ struct BufferMonitor : public ModulePass
                     // Set insert point after current instruction
                     this->builder->SetInsertPoint(I->getNextNode());
 
-                    // Skip to next instruction
-                    // nextInstruction++;
-
                     // Cast the pointer to the buffer to a generic i8* pointer
                     Value* bufferAddress = allocaInst;
                     if (allocaInst->getType() != Type::getInt8PtrTy(context)) 
@@ -1038,17 +637,6 @@ struct BufferMonitor : public ModulePass
                     }
                     
                     InsertBufferToList(bufferAddress, bufferSizeValue);
-
-                    // Write size of stack-array to file
-                    /*
-                    std::string outputString = "Stack allocation of size: %d\n";
-                    Value* formatString = this->builder->CreateGlobalStringPtr(outputString, "fileFormatString", 0, module);
-                    // Load the file pointer from the global variable
-                    Value *loadedFilePtr = this->builder->CreateLoad(globalFilePtr->getType()->getPointerElementType(), globalFilePtr);
-                    this->builder->CreateCall(fprintfFunc, { loadedFilePtr, formatString, bufferSizeValue });
-
-                    DEBUG_PRINT("Allocated array of size " << arraySize << " stored in linked list");
-                    */
                 }    
             }
             
@@ -1082,15 +670,6 @@ struct BufferMonitor : public ModulePass
 
                         // Store dynamically allocated buffer in linked list
                         InsertBufferToList(bufferAddress, bufferSize);
-
-                        // Write size of dynamicallly allocated array to file
-                        /*
-                        std::string outputString = "Heap allocation of size: %d\n";
-                        Value* formatString = builder->CreateGlobalStringPtr(outputString, "fileFormatString", 0, module);
-                        // Load the file pointer from the global variable
-                        Value *loadedFilePtr = builder->CreateLoad(globalFilePtr->getType()->getPointerElementType(), globalFilePtr);
-                        builder->CreateCall(fprintfFunc, { loadedFilePtr, formatString, bufferSize });
-                        */
                     }
                 }
             }
@@ -1144,16 +723,6 @@ struct BufferMonitor : public ModulePass
                 int iteration = 0;
                 for (auto it = gepInst->idx_begin(); it != gepInst->idx_end(); it++, iteration++) 
                 {
-                    // getelementptr instruction has two index values
-                    // For arrays with one dimension the first is always zero
-                    /*
-                    if (!isMultiDimensionalArray && iteration == 0) 
-                    {
-                        // Skip the first iteration if the array is not multi-dimensional
-                        // continue;
-                    }
-                    */
-
                     // Determine accessed byte
                     Value* indexValue = it->get();
                     Value* accessedBytes = builder->CreateMul(indexValue, ConstantInt::get(Type::getInt64Ty(context), elementSizeInBytes));
@@ -1174,10 +743,14 @@ struct BufferMonitor : public ModulePass
                     // Update the highest accessed byte of the buffer node if the currently accessed byte is greater then
                     // the highest accessed byte of the buffer node
                     this->builder->CreateCall(setHighestAccessedByteFunction, { bufferNode, accessedBytes });
+                    
+                    // TODO: Write buffer access to shared memory
 
-                    // Write BufferNode data to file
-                    // this->builder->CreateCall(writeToFileFunction, { bufferNode, accessedBytes });
-                
+                    /*
+                        // Write one to shared memory
+                        LoadInst* sharedMemoryValue = this->builder->CreateLoad(sharedMemory);
+                        this->builder->CreateStore(ConstantInt::get(Type::getInt8Ty(context), 1), sharedMemoryValue);
+                    */
                 }
             } 
 

@@ -66,6 +66,7 @@ struct BufferMonitor : public ModulePass
     // Head of the linked list storing address and size of dynamically allocated buffers
     StructType* BufferNodeTy;
     GlobalVariable* BufferListHead; 
+    GlobalVariable* __file_FileDescritor;
 
     Module* module;
 
@@ -139,6 +140,11 @@ struct BufferMonitor : public ModulePass
                 "BufferListHead"                                                // Name
             );
         }
+
+        // Get global file descriptor for the output file created in constructor.c
+        __file_FileDescritor = 
+            new GlobalVariable(*module, PointerType::get(IntegerType::getInt8Ty(context), 0), false,
+                                                                    GlobalValue::ExternalLinkage, 0, "__file_");
 
         /*
             Create shared memory location for communication with fuzzer
@@ -226,6 +232,8 @@ struct BufferMonitor : public ModulePass
             return 1;
         }
 
+        /*
+        
         // Create shared memory location with shmget
         key_t key = 1234;
         Value* shmgetArg1 = ConstantInt::get(IntegerType::getInt32Ty(context), key);
@@ -247,6 +255,8 @@ struct BufferMonitor : public ModulePass
         // Detach shared memory location with shmdt
         Value* shmdtArg1 = shmid;
         builder->CreateCall(shmdtFunction, { shmdtArg1 });
+
+        */
 
         // If the compiled LLVM IR file the FILE* object is represented as a structure of type %struct._IO_FILE
         // We retrieve this type and create a pointer type to it for defining the signature of fopen, fprintf and fclose
@@ -629,6 +639,7 @@ struct BufferMonitor : public ModulePass
         // Insert printf inside thenBlock
         this->builder->SetInsertPoint(thenBlockSGE);
 
+        /*
         // Open the file for writing in the beginning of the main function
         filename = builder->CreateGlobalStringPtr("output.txt");
         // Open file in append mode
@@ -636,6 +647,7 @@ struct BufferMonitor : public ModulePass
 
         // Open file for writing
         Value* file_ptr_tmp = builder->CreateCall(fopenFunc, { filename, mode });
+        */
 
         // Get the elements of the buffer node
         Value* bufferIDPtr = this->builder->CreateStructGEP(BufferNodeTy, buffer, 0);
@@ -655,10 +667,12 @@ struct BufferMonitor : public ModulePass
         Value* formatString = this->builder->CreateGlobalStringPtr(outputString.c_str());
 
         // Write to file
-        this->builder->CreateCall(fprintfFunc, { file_ptr_tmp, formatString, bufferAddress, accessedByte, bufferSize, bufferID, highestAccessedByte });
+        this->builder->CreateCall(fprintfFunc, { __file_FileDescritor, formatString, bufferAddress, accessedByte, bufferSize, bufferID, highestAccessedByte });
     
+        /*
         // Close file after writing to it
         builder->CreateCall(fcloseFunc, { file_ptr_tmp });
+        */
 
         // Jump to the continue block after printf
         this->builder->CreateBr(continueBlockSGE);
@@ -1162,7 +1176,7 @@ struct BufferMonitor : public ModulePass
                     this->builder->CreateCall(setHighestAccessedByteFunction, { bufferNode, accessedBytes });
 
                     // Write BufferNode data to file
-                    this->builder->CreateCall(writeToFileFunction, { bufferNode, accessedBytes });
+                    // this->builder->CreateCall(writeToFileFunction, { bufferNode, accessedBytes });
                 
                 }
             } 

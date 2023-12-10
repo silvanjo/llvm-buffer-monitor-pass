@@ -18,7 +18,13 @@
 #include <set>
 #include <string>
 #include <cstdint>
+#include <stdio.h>
 #include <iostream>
+#include <sys/ipc.h>
+#include <sys/shm.h>
+
+
+#define SHM_SIZE 1024 // 1KB
 
 // Print on console only when in debug mode
 #ifdef DEBUG
@@ -69,7 +75,11 @@ struct BufferMonitor : public ModulePass
     Function* fcloseFunc;
     Function* mallocFunc;
     Function* fprintfFunc;
-    Function* printfFunction;
+
+    // Functions for shared memory
+    Function* shmgetFunc;
+    Function* shmatFunc;
+    Function* shmdtFunc;
 
     // Custom LLVM functions
     Function* getBufferFunction;
@@ -129,17 +139,114 @@ struct BufferMonitor : public ModulePass
                 "BufferListHead"                                                // Name
             );
         }
-        
-        // Get printf function
-        std::vector<Type*> printfArgsTypes;
-        printfArgsTypes.push_back(Type::getInt8PtrTy(context));
-        FunctionType* printfFunctionType = FunctionType::get(builder->getInt32Ty(), printfArgsTypes, true);
-        printfFunction = module->getFunction("printf");
-        if (!printfFunction) 
+
+        /*
+            Create shared memory location for communication with fuzzer
+        */
+
+        // Insert shmget function for creating shared memory location
+        // prototype: int shmget(key_t key, size_t size, int shmflg);
+        FunctionType *shmgetType = FunctionType::get( IntegerType::getInt32Ty(context), 
+                                                    { IntegerType::getInt32Ty(context), 
+                                                      IntegerType::getInt64Ty(context), 
+                                                      IntegerType::getInt32Ty(context) }, 
+                                                      false);
+
+        auto shmgetCallee = module->getOrInsertFunction("shmget", shmgetType);
+        Constant* shmgetConstant = dyn_cast<Constant>(shmgetCallee.getCallee());
+
+        Function* shmgetFunction = nullptr;
+        if (Function* func = dyn_cast<Function>(shmgetConstant)) 
         {
-            printfFunction = Function::Create(printfFunctionType, Function::ExternalLinkage, "printf", module);
+            shmgetFunction = func;
+        }
+        else if (ConstantExpr* constExpr = dyn_cast<ConstantExpr>(shmgetConstant)) 
+        {
+            if (constExpr->isCast() && isa<Function>(constExpr->getOperand(0))) 
+                shmgetFunction = dyn_cast<Function>(constExpr->getOperand(0));
         }
 
+        if (!shmgetFunction) 
+        {
+            std::cerr << "Could not get or insert shmget function" << std::endl;
+            return 1;
+        }
+
+        // Insert shmat function for attaching shared memory location
+        // prototype: void *shmat(int shmid, const void *shmaddr, int shmflg);
+        FunctionType *shmatType = FunctionType::get( PointerType::get(Type::getInt8Ty(context), 0), 
+                                                    { IntegerType::getInt32Ty(context), 
+                                                      PointerType::get(Type::getInt8Ty(context), 0), 
+                                                      IntegerType::getInt32Ty(context) }, 
+                                                      false);
+
+        auto shmatCallee = module->getOrInsertFunction("shmat", shmatType);
+        Constant* shmatConstant = dyn_cast<Constant>(shmatCallee.getCallee());
+
+        Function* shmatFunction = nullptr;
+        if (Function* func = dyn_cast<Function>(shmatConstant)) 
+        {
+            shmatFunction = func;
+        }
+        else if (ConstantExpr* constExpr = dyn_cast<ConstantExpr>(shmatConstant)) 
+        {
+            if (constExpr->isCast() && isa<Function>(constExpr->getOperand(0))) 
+                shmatFunction = dyn_cast<Function>(constExpr->getOperand(0));
+        }
+
+        if (!shmatFunction) 
+        {
+            std::cerr << "Could not get or insert shmat function" << std::endl;
+            return 1;
+        }
+
+        // Insert shmdt function for controlling shared memory location
+        // prototype: int shmdt(const void *shmaddr);
+        FunctionType *shmdtType = FunctionType::get( IntegerType::getInt32Ty(context), 
+                                                    { PointerType::get(Type::getInt8Ty(context), 0) }, 
+                                                    false);
+
+        auto shmdtCallee = module->getOrInsertFunction("shmdt", shmdtType);
+        Constant* shmdtConstant = dyn_cast<Constant>(shmdtCallee.getCallee());
+
+        Function* shmdtFunction = nullptr;
+        if (Function* func = dyn_cast<Function>(shmdtConstant)) 
+        {
+            shmdtFunction = func;
+        }
+        else if (ConstantExpr* constExpr = dyn_cast<ConstantExpr>(shmdtConstant)) 
+        {
+            if (constExpr->isCast() && isa<Function>(constExpr->getOperand(0))) 
+                shmdtFunction = dyn_cast<Function>(constExpr->getOperand(0));
+        }
+
+        if (!shmdtFunction) 
+        {
+            std::cerr << "Could not get or insert shmdt function" << std::endl;
+            return 1;
+        }
+
+        // Create shared memory location with shmget
+        key_t key = 1234;
+        Value* shmgetArg1 = ConstantInt::get(IntegerType::getInt32Ty(context), key);
+        Value* shmgetArg2 = ConstantInt::get(IntegerType::getInt64Ty(context), SHM_SIZE);
+        Value* shmgetArg3 = ConstantInt::get(IntegerType::getInt32Ty(context), 0666 | IPC_CREAT);
+        Value* shmid = builder->CreateCall(shmgetFunction, { shmgetArg1, shmgetArg2, shmgetArg3 });
+
+        // Attach shared memory location with shmat
+        Value* shmatArg1 = shmid;
+        Value* shmatArg2 = ConstantPointerNull::get(PointerType::get(Type::getInt8Ty(context), 0));
+        Value* shmatArg3 = ConstantInt::get(IntegerType::getInt32Ty(context), 0);
+        Value* shmat = builder->CreateCall(shmatFunction, { shmatArg1, shmatArg2, shmatArg3 });
+
+        // Write 1 to shared memory location
+        Value* sharedMemoryDataPtr = builder->CreatePointerCast(shmat, PointerType::get(IntegerType::getInt32Ty(context), 0));
+        Value* sharedMemoryDataValue = ConstantInt::get(IntegerType::getInt32Ty(context), 1);
+        builder->CreateStore(sharedMemoryDataValue, sharedMemoryDataPtr);
+
+        // Detach shared memory location with shmdt
+        Value* shmdtArg1 = shmid;
+        builder->CreateCall(shmdtFunction, { shmdtArg1 });
 
         // If the compiled LLVM IR file the FILE* object is represented as a structure of type %struct._IO_FILE
         // We retrieve this type and create a pointer type to it for defining the signature of fopen, fprintf and fclose
@@ -210,6 +317,7 @@ struct BufferMonitor : public ModulePass
         this->fprintfFunc = fprintfFunction;
 
         // Get or insert the malloc function
+        // TODO: possible error when the target program uses malloc?
         mallocFunc = module->getFunction("malloc");
         if (!mallocFunc) 
         {
@@ -658,6 +766,17 @@ struct BufferMonitor : public ModulePass
             return F;
 
         LLVMContext& context = this->module->getContext();
+
+        // Get printf function
+        std::vector<Type*> printfArgsTypes;
+        printfArgsTypes.push_back(Type::getInt8PtrTy(context));
+        FunctionType* printfFunctionType = FunctionType::get(builder->getInt32Ty(), printfArgsTypes, true);
+        Function* printfFunction = module->getFunction("printf");
+        if (!printfFunction) 
+        {
+            printfFunction = Function::Create(printfFunctionType, Function::ExternalLinkage, "printf", module);
+        }
+
 
         // Get pointer type of BufferNode* using the default address space (0)
         PointerType* bufferNodePtrType = PointerType::get(BufferNodeTy, 0); 

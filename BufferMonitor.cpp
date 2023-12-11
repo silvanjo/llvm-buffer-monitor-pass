@@ -6,19 +6,18 @@
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/LLVMContext.h"
-#include "llvm/IR/Instructions.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/Transforms/IPO/PassManagerBuilder.h"
 
-
-#include <map>
-#include <set>
 #include <string>
 #include <cstdint>
 #include <iostream>
+
+// Contains declaration of buffer_node_t
+#include "BufferNode.h"
 
 // Print on console only when in debug mode
 #ifdef DEBUG
@@ -38,51 +37,34 @@ using namespace llvm;
 namespace 
 {
 
-// Node of a linked list used to store information about allocated buffer (static and dynamic)
-// The linked list becomes instrumented into the transformed target program
-// to have access to the buffer sizes at runtime
-struct BufferNode 
-{
-    uint64_t BufferID;                  // Unique ID of this buffer
-    uint64_t highestAccessedByte;      // The highest accessed index of this buffer during program execution
-
-    void* bufferAddr;                   // Address of the allocated buffer
-    size_t bufferSize;                  // Size of the buffer
-
-    struct BufferNode* next;            // Pointer to the next node
-};
-
-
 struct BufferMonitor : public ModulePass
 {
     static char ID;
 
-    // Head of the linked list storing address and size of dynamically allocated buffers
-    StructType* BufferNodeTy;
-    GlobalVariable* BufferListHead; 
-
-    GlobalVariable* sharedMemory; 
-
     Module* module;
-
     std::unique_ptr<IRBuilder<>> builder;
 
-    Function* mallocFunc;
+    // Buffer node list for storing data about all buffers found in 
+    // the target program
+    GlobalVariable* bufferNodeList;
 
-    // Custom LLVM functions
-    Function* getBufferFunction;
-    Function* setHighestAccessedByteFunction;
-    Function* writeGEPToSharedMemoryFunction;
-
-    Value* mode;
-    Value* filename;
-
-    // Functions to be skipped
-    std::set<Function*> skipFunctions;
+    // Functions from BufferMonitorLib.c used by the instrumentation
+    Function* insertBufferNodeFunction;
+    Function* updateHighestAccessedByteFunction;
 
     BufferMonitor() : ModulePass(ID)
     {
         
+    }
+
+    Function* GetOrCreateFunction(const std::string& name, Module& module, LLVMContext& context, FunctionType* functionType) 
+    {
+        Function* function = module.getFunction(name);
+
+        if (!function) 
+            function = Function::Create(functionType, Function::ExternalLinkage, name, &module);
+        
+        return function;
     }
 
     bool init(Module& M) 
@@ -95,478 +77,21 @@ struct BufferMonitor : public ModulePass
         LLVMContext& context = M.getContext();
         builder = std::make_unique<IRBuilder<>>(context);
 
-        // Create the first node of the linked list
-        BufferNodeTy = StructType::create(context, "BufferNode");
+        // Get head of buffer node list
+        this->bufferNodeList = new GlobalVariable(*module, PointerType::get(IntegerType::getInt8Ty(context), 0), false,
+                                                                            GlobalValue::ExternalLinkage, 0, "__buffer_node_list_");
 
-        // Define the types of the fields in BufferNode
-        std::vector<Type*> BufferNodeFields;
-        BufferNodeFields.push_back(Type::getInt64Ty(context));                      // BufferID
-        BufferNodeFields.push_back(Type::getInt64Ty(context));                      // highestAccessedByte
-        BufferNodeFields.push_back(PointerType::get(Type::getInt8Ty(context), 0));  // bufferAddr
-        BufferNodeFields.push_back(Type::getInt64Ty(context));                      // bufferSize
-        BufferNodeFields.push_back(PointerType::get(BufferNodeTy, 0));              // next pointer set to NULL
-        
-        // Set the fields for BufferNodeTy
-        BufferNodeTy->setBody(BufferNodeFields);
-        
-        // Get the global variable BufferListHeador create it if it does not exist
-        this->BufferListHead = module->getGlobalVariable("BufferListHead");
-        if (!this->BufferListHead) 
-        {
-            DEBUG_PRINT_INFO("Create BufferList");
+        /*
+            Get all functions used by the instrumentation from BufferMonitorLib.c
+        */
+    
+        FunctionType* insertBufferNodeFunctionType = FunctionType::get(Type::getVoidTy(context), { Type::getInt8PtrTy(context), Type::getInt64Ty(context) }, false);
+        this->insertBufferNodeFunction = GetOrCreateFunction("insert_buffer_node", *module, context, insertBufferNodeFunctionType);
 
-            // Create the head of the linked list
-            BufferListHead = new GlobalVariable(
-                *module,                                                        // Module
-                PointerType::get(BufferNodeTy, 0),                              // Type
-                false,                                                          // isConstant
-                Function::InternalLinkage,                                      // Make it available to all modules
-                ConstantPointerNull::get(PointerType::get(BufferNodeTy, 0)),    // Initializer
-                "BufferListHead"                                                // Name
-            );
-        }
-
-        // Get shared memory location created in constructor.c for writing buffer data
-        this->sharedMemory = new GlobalVariable(*module, PointerType::get(IntegerType::getInt8Ty(context), 0), false,
-                                                        GlobalValue::ExternalLinkage, 0, "__shared_memory_");
-
-        // Get or insert the malloc function
-        mallocFunc = module->getFunction("malloc");
-        if (!mallocFunc) 
-        {
-            std::vector<Type*> mallocArgTypes;
-            mallocArgTypes.push_back(Type::getInt64Ty(context));
-            FunctionType* mallocFuncType = FunctionType::get(Type::getInt8PtrTy(context), mallocArgTypes, false);
-            mallocFunc = Function::Create(mallocFuncType, Function::ExternalLinkage, "malloc", module);
-        }
-
-        this->getBufferFunction = CreateGetBufferFunction();
-
-        // Check if function is correct after transformations
-        if (verifyFunction(*this->getBufferFunction, &llvm::errs())) 
-        {
-            DEBUG_PRINT_ERROR("getBufferFuntion Function verification failed after transformations!");
-            #ifdef DEBUG
-                // this->getBufferFunction->dump();
-            #endif
-        }
-
-        this->setHighestAccessedByteFunction = CreateSetHighestAccessedByteFunction();
-
-        // Check if function is correct after transformations
-        if (verifyFunction(*this->setHighestAccessedByteFunction, &llvm::errs())) 
-        {
-            DEBUG_PRINT_ERROR("printBufferListFunction function verification failed after transformations!");
-            #ifdef DEBUG
-                // this->setHighestAccessedByteFunction->dump();
-            #endif
-        }
-
-        // Add functions to skip
-        skipFunctions.insert(this->getBufferFunction);
-        skipFunctions.insert(this->setHighestAccessedByteFunction);
+        FunctionType* updateHighestAccessedByteType = FunctionType::get(Type::getVoidTy(context), { Type::getInt8PtrTy(context), Type::getInt64Ty(context) }, false);
+        this->updateHighestAccessedByteFunction = GetOrCreateFunction("update_highest_accessed_byte", *module, context, updateHighestAccessedByteType);
 
         return true;
-    }
-
-    // Creates LLVM function for searching for the buffer with the given ID in the linked list, return null if buffer is not in the list 
-    Function* CreateGetBufferFunction()
-    {
-        std::string functionName = "getBuffer";
-
-        // Check if the function already exists in the module
-        if (Function *F = this->module->getFunction(functionName)) 
-            return F;
-
-        LLVMContext& context = this->module->getContext();
-
-        // Get pointer type of BufferNode* using the default address space (0)
-        PointerType* bufferNodePtrType = PointerType::get(BufferNodeTy, 0); 
-
-        // The function returns a BufferNode* and gets a i8* (the address of the buffer). It's not a variadic function
-        FunctionType* functionType = FunctionType::get( bufferNodePtrType, 
-                                                        Type::getInt8PtrTy(context), 
-                                                        false);
-
-        Function* getBufferFunction = Function::Create( functionType, 
-                                                        Function::InternalLinkage,
-                                                        functionName,
-                                                        module);
-
-        // Set the name of the arguement
-        getBufferFunction->arg_begin()->setName("bufferAddress");
-
-        // Define the function body
-        BasicBlock* entry = BasicBlock::Create(context, "entry", getBufferFunction);
-        this->builder->SetInsertPoint(entry);
-
-        // Load BufferListHead
-        GlobalVariable* bufferListHead = this->module->getNamedGlobal("BufferListHead");
-        Value* head = this->builder->CreateLoad(bufferListHead->getType()->getPointerElementType(), bufferListHead, "current");
-
-        // Create an alloca instruction to store the current node
-        AllocaInst* currentNodeAlloca = builder->CreateAlloca(head->getType(), 0, "currentNodeAlloca");
-        builder->CreateStore(head, currentNodeAlloca);
-
-        // Create loop condition, loop body, and exit blocks
-        BasicBlock* checkIfHeadIsNull = BasicBlock::Create(context, "checkIfHeadIsNull", getBufferFunction);
-        BasicBlock* loopBody = BasicBlock::Create(context, "loopBody", getBufferFunction);
-        BasicBlock* exitBlock = BasicBlock::Create(context, "exitBlock", getBufferFunction);
-
-        this->builder->CreateBr(checkIfHeadIsNull);
-        this->builder->SetInsertPoint(checkIfHeadIsNull);
-
-        // Loop condition: check if current node is null
-        Type* bufferNodeType = head->getType();
-        Constant* nullConstant = Constant::getNullValue(bufferNodeType);
-        Value* headIsNull = this->builder->CreateICmpEQ(head, nullConstant, "isEnd");
-        this->builder->CreateCondBr(headIsNull, exitBlock, loopBody);
-
-        // Loop body: Check buffer address and traverse the list
-        this->builder->SetInsertPoint(loopBody);
-
-        // Load the current node from memory
-        Value* current = builder->CreateLoad(currentNodeAlloca->getType()->getPointerElementType(), currentNodeAlloca, "current");
-
-        Value* nodeDataAddr = this->builder->CreateStructGEP(BufferNodeTy, current, 2, "nodeDataAddr");
-        Value* nodeData = this->builder->CreateLoad(nodeDataAddr->getType()->getPointerElementType(), nodeDataAddr, "nodeData");
-        Value* isMatch = this->builder->CreateICmpEQ(nodeData, getBufferFunction->arg_begin(), "isMatch");
-    
-        // Create blocks for the two possible cases
-        // 1. The current node is a match
-        // 2. The current node is not a match
-        BasicBlock* nodeFound = BasicBlock::Create(context, "nodeFound", getBufferFunction);
-        BasicBlock* nextIteration = BasicBlock::Create(context, "nextIteration", getBufferFunction);
-        this->builder->CreateCondBr(isMatch, nodeFound, nextIteration);
-
-        // If node was found return it
-        this->builder->SetInsertPoint(nodeFound);
-        this->builder->CreateRet(current);
-
-        // Move to next node
-        this->builder->SetInsertPoint(nextIteration);
-        Value* nextNodeAddr = this->builder->CreateStructGEP(BufferNodeTy, current, 4, "nextNodeAddr");
-        Value* nextNode = this->builder->CreateLoad(nextNodeAddr->getType()->getPointerElementType(), nextNodeAddr, "nextNode");
-       
-        // Store nextNode to access is it in the next iteration
-        builder->CreateStore(nextNode, currentNodeAlloca);
-
-        // Check if node is null (end of list)
-        Value* isEnd = this->builder->CreateICmpEQ(nextNode, nullConstant, "isEnd");
-        this->builder->CreateCondBr(isEnd, exitBlock, loopBody);
-        
-        // Exit block: If buffer not found return nullptr of type BufferNode*
-        this->builder->SetInsertPoint(exitBlock);
-        Value* nullptrBufferNode = Constant::getNullValue(bufferNodePtrType); 
-        this->builder->CreateRet(nullptrBufferNode);
-
-        return getBufferFunction;
-    }
-
-    // LLVM function that updates the highestAccessedByte member of BufferNode if the passed index 
-    // is higher then the current value of highestAccessedByte
-    // This function returns true if value was updated
-    Function* CreateSetHighestAccessedByteFunction()
-    {
-        std::string functionName = "setHighestAccessedByte";
-
-        // Check if the function already exists in the module
-        if (Function *F = this->module->getFunction(functionName)) 
-            return F;
-
-        LLVMContext& context = this->module->getContext();
-
-        // Get pointer type of BufferNode* using the default address space (0)
-        PointerType* buffernodePtrType = PointerType::get(BufferNodeTy, 0);
-        // Get nullptr of type BufferNotTy
-        Constant* bufferNodeNullptr = ConstantPointerNull::get(buffernodePtrType);
-
-        // Specify the function type of writeToFileFunction 
-        FunctionType* setHighestAccessedByteFunctionType = FunctionType::get( Type::getInt1Ty(context),
-                                                                              { buffernodePtrType, Type::getInt64Ty(context) },
-                                                                              false);
-
-        Function* setHighestAccessedByteFunction = Function::Create( setHighestAccessedByteFunctionType,
-                                                                      Function::InternalLinkage,
-                                                                      functionName,
-                                                                      this->module);
-        
-        BasicBlock* entryBB = BasicBlock::Create(context, "Entry", setHighestAccessedByteFunction);
-        // Body of the function
-        BasicBlock* bodyBB = BasicBlock::Create(context, "Body", setHighestAccessedByteFunction);
-        // This Basic Block is reached if currently accessed byte is greater then the highest accessed byte
-        BasicBlock* isGreaterBB = BasicBlock::Create(context, "IsGreater", setHighestAccessedByteFunction);
-        // This basic block return true (highestAccessedByte changed)
-        BasicBlock* returnTrueBB = BasicBlock::Create(context, "Changed", setHighestAccessedByteFunction); 
-        // This basic block returns false (highestAccessedByte not changed)
-        BasicBlock* returnFalseBB = BasicBlock::Create(context, "NotChanged", setHighestAccessedByteFunction);
-
-        // Get buffer from argument list
-        Value* buffer = &*setHighestAccessedByteFunction->arg_begin();    
-        // Get accessed byte from argument list
-        Value* accessedByte = setHighestAccessedByteFunction->arg_begin() + 1;
-
-        this->builder->SetInsertPoint(entryBB);
-
-        // Check if the passed buffer node is null
-        Value* bufferNodeIsNullptr = this->builder->CreateICmpEQ(buffer, bufferNodeNullptr); 
-        // Create a conditional branch
-        this->builder->CreateCondBr(bufferNodeIsNullptr, returnFalseBB, bodyBB);
-
-        this->builder->SetInsertPoint(bodyBB);
-                
-        // Get highestAccessedByte pointer from buffer node
-        Value* highestAccessedBytePtr = this->builder->CreateStructGEP(this->BufferNodeTy, buffer, 1, "HighestAccessedBytePtr"); 
-        Value* highestAccessedByte    = this->builder->CreateLoad(highestAccessedBytePtr, "HighestAccessedByte");
-
-        // Check if the currently accessed byte is greater then the highestAccessedByte
-        Value* isGreater = builder->CreateICmpSGT(accessedByte, highestAccessedByte, "accessedByteIsGreater");
-        // Conditional branch dependending on isGreater 
-        this->builder->CreateCondBr(isGreater, isGreaterBB, returnFalseBB);
-
-        this->builder->SetInsertPoint(isGreaterBB);
-      
-        // Currently accessed byte is greater then the highest accessed byter, so we update it
-        this->builder->CreateStore(accessedByte, highestAccessedBytePtr);
-
-        this->builder->CreateBr(returnTrueBB); 
-
-        this->builder->SetInsertPoint(returnTrueBB);
-        // True variable
-        Value* trueValue = ConstantInt::get(Type::getInt1Ty(context), 1);
-        // Return true
-        this->builder->CreateRet(trueValue);
-
-        this->builder->SetInsertPoint(returnFalseBB);
-        // False Value
-        Value* falseValue = ConstantInt::get(Type::getInt1Ty(context), 0);
-        // Return false
-        this->builder->CreateRet(falseValue);
-        
-        return setHighestAccessedByteFunction;
-    }
-
-    Function* CreateWriteGEPToSharedMemoryFunction()
-    {
-        std::string functionName = "writeBufferToSharedMemory";
-
-        // Check if the function already exists in the module
-        if (Function *F = this->module->getFunction(functionName)) 
-            return F;
-
-        LLVMContext& context = this->module->getContext();
-
-        // Get pointer type of BufferNode* using the default address space (0)
-        PointerType* bufferNodePtrType = PointerType::get(BufferNodeTy, 0);
-        // Get nullptr of type BufferNotTy
-        Constant* bufferNodeNullptr = ConstantPointerNull::get(bufferNodePtrType);
-
-        // Specify the function type of writeGEPToSharedMemoryFunction
-        FunctionType* writeToFileFunctionType = FunctionType::get(  Type::getVoidTy(context), 
-                                                                    {bufferNodePtrType, Type::getInt64Ty(context)}, 
-                                                                    false);
-
-        Function* writeGEPToSharedMemoryFunction = Function::Create(writeToFileFunctionType, 
-                                                                    Function::InternalLinkage, 
-                                                                    functionName, 
-                                                                    this->module);
-    }
-
-    /*
-    // LLVM function that takes a BufferNode* and writes it's data to the file
-    Function* CreateWriteToFileFunction()
-    {
-        std::string functionName = "writeToFile";
-
-        // Check if the function already exists in the module
-        if (Function *F = this->module->getFunction(functionName)) 
-            return F;
-
-        LLVMContext& context = this->module->getContext();
-
-        // Get pointer type of BufferNode* using the default address space (0)
-        PointerType* bufferNodePtrType = PointerType::get(BufferNodeTy, 0); 
-        // Get nullptr of type BufferNotTy
-        Constant* bufferNodeNullptr = ConstantPointerNull::get(bufferNodePtrType);
-
-        // Specify the function type of writeToFileFunction 
-        FunctionType* writeToFileFunctionType = FunctionType::get(  Type::getVoidTy(context), 
-                                                                    {bufferNodePtrType, Type::getInt64Ty(context)}, 
-                                                                    false);
-
-        Function* writeToFileFunction = Function::Create(   writeToFileFunctionType, 
-                                                            Function::InternalLinkage, 
-                                                            functionName, 
-                                                            this->module);
-
-        BasicBlock* entry = BasicBlock::Create(context, "entry", writeToFileFunction);
-        BasicBlock* accessedByteIsNotZero = BasicBlock::Create(context, "accessedByteIsNotZero", writeToFileFunction);
-        BasicBlock* thenBlockSGE = BasicBlock::Create(context, "then_buffer_found", writeToFileFunction);
-        BasicBlock* continueBlockSGE = BasicBlock::Create(context, "continue_buffer_not_found", writeToFileFunction);
-
-        // Get buffer from argument list
-        Value* buffer = &*writeToFileFunction->arg_begin();    
-        // Get accessed byte from argument list
-        Value* accessedByte = writeToFileFunction->arg_begin() + 1; 
-
-        this->builder->SetInsertPoint(entry);
-
-        // Get zero value to check against the accessedBytes variable
-        Value* zeroValue = Constant::getNullValue(accessedByte->getType());
-        // Check if the accessed byte is zero
-        Value* accessedByteIsZero = this->builder->CreateICmpEQ(accessedByte, zeroValue, "accessedByteIsZero");
-        // Create a conditional branch
-        this->builder->CreateCondBr(accessedByteIsZero, continueBlockSGE, accessedByteIsNotZero);
-
-        this->builder->SetInsertPoint(accessedByteIsNotZero);
-
-        // Check if the passed buffer node is null
-        Value* bufferNodeIsNullptr = this->builder->CreateICmpEQ(buffer, bufferNodeNullptr);  
-
-        // Create a conditional branch
-        this->builder->CreateCondBr(bufferNodeIsNullptr, continueBlockSGE, thenBlockSGE);
-
-        // Insert printf inside thenBlock
-        this->builder->SetInsertPoint(thenBlockSGE);
-
-        // Open the file for writing in the beginning of the main function
-        filename = builder->CreateGlobalStringPtr("output.txt");
-        // Open file in append mode
-        mode = builder->CreateGlobalStringPtr("a");
-
-        // Open file for writing
-        Value* file_ptr_tmp = builder->CreateCall(fopenFunc, { filename, mode });
-
-        // Get the elements of the buffer node
-        Value* bufferIDPtr = this->builder->CreateStructGEP(BufferNodeTy, buffer, 0);
-        Value* bufferID    = this->builder->CreateLoad(bufferIDPtr, "BufferID");
-
-        Value* highestAccessedBytePtr = this->builder->CreateStructGEP(BufferNodeTy, buffer, 1);
-        Value* highestAccessedByte    = this->builder->CreateLoad(highestAccessedBytePtr, "HighestByte");
-
-        Value* bufferAddressPtr = this->builder->CreateStructGEP(BufferNodeTy, buffer, 2);
-        Value* bufferAddress    = this->builder->CreateLoad(bufferAddressPtr, "BufferAddress");
-
-        Value* bufferSizePtr = this->builder->CreateStructGEP(BufferNodeTy, buffer, 3); 
-        Value* bufferSize    = this->builder->CreateLoad(bufferSizePtr, "BufferSize");
-
-        // Create output string for the file
-        std::string outputString = "Buffer address %p; Accessed index %d; Buffer size %d; ID %d; HAB %d\n";
-        Value* formatString = this->builder->CreateGlobalStringPtr(outputString.c_str());
-
-        // Write to file
-        this->builder->CreateCall(fprintfFunc, { file_ptr_tmp, formatString, bufferAddress, accessedByte, bufferSize, bufferID, highestAccessedByte });
-    
-        // Close file after writing to it
-        builder->CreateCall(fcloseFunc, { file_ptr_tmp });
-
-        // Jump to the continue block after printf
-        this->builder->CreateBr(continueBlockSGE);
-
-        // Set the insert point back to the continue block
-        this->builder->SetInsertPoint(continueBlockSGE);
-    
-        builder->CreateRetVoid();
-
-        return writeToFileFunction;
-    }
-    */
-
-    // TODO: Wrap code in function
-    // Insert buffer to linked list
-    void InsertBufferToList(Value* bufferAddress, Value* bufferSize)
-    {
-        LLVMContext& context = this->module->getContext();
-
-        // Unique buffer id for each newly inserted buffer
-        static uint64_t BufferID = 0;
-        BufferID += 1;
-        Value* bufferIDValue = ConstantInt::get(Type::getInt64Ty(context), BufferID);
-
-        Value* zeroConstant = ConstantInt::get(Type::getInt64Ty(context), 0);
-
-        // Get data layout of the module to exactly determine the size of the BufferNode struct
-        const DataLayout& DL = module->getDataLayout();
-
-        // Get null pointer of type BufferNodeTy
-        Value* nullPtr = ConstantPointerNull::get(PointerType::get(BufferNodeTy, 0));       
-
-        // Determine size of BufferNode struct for malloc instruction
-        uint64_t size = DL.getTypeAllocSize(BufferNodeTy);
-        ConstantInt* sizeofBufferNode = ConstantInt::get(Type::getInt64Ty(context), size);
-
-        // Create malloc call to create new BufferNode storing address and size of a dynamically allocated buffer
-        Value* newNode = builder->CreateCall(mallocFunc, sizeofBufferNode);
-
-        // Cast the return value of malloc to BufferNodeTy
-        newNode = builder->CreateBitCast(newNode, PointerType::getUnqual(BufferNodeTy));
-
-        // Initialize the new node
-        builder->CreateStore(bufferIDValue, builder->CreateStructGEP(this->BufferNodeTy, newNode, 0));  // Store BufferID
-        builder->CreateStore(zeroConstant,  builder->CreateStructGEP(this->BufferNodeTy, newNode, 1));  // Initialize highest accessed index with zero
-        builder->CreateStore(bufferAddress, builder->CreateStructGEP(this->BufferNodeTy, newNode, 2));  // Store address
-        builder->CreateStore(bufferSize,    builder->CreateStructGEP(this->BufferNodeTy, newNode, 3));  // Store size
-        builder->CreateStore(nullPtr,       builder->CreateStructGEP(this->BufferNodeTy, newNode, 4));  // Set next to nullptr
-
-        // Insert the new node at the beginning of the linked list
-        Value* currentHead = builder->CreateLoad(BufferListHead->getType()->getPointerElementType(), BufferListHead, "currentHead");
-        builder->CreateStore(newNode, BufferListHead);                                              // Update the head of the list to point to the new node
-        builder->CreateStore(currentHead, builder->CreateStructGEP(BufferNodeTy, newNode, 4));      // Set next node of the new node to previous head           
-    }
-
-    // Returns true if the alloca instruction is a multi-dimensional array
-    bool IsMultiDimensionalArray(AllocaInst* alloca)
-    {
-        if (!alloca) 
-            return false;
-        
-        llvm::Type* allocatedType = alloca->getAllocatedType();
-            
-        // Check if the allocated type is an ArrayType
-        if (ArrayType* arrayType = dyn_cast<ArrayType>(allocatedType)) 
-        {
-            // Now, check if the element of this array itself is an ArrayType
-            if(isa<ArrayType>(arrayType->getElementType())) 
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    // Returns true if the gep instruction is performed on a multi-dimensional array
-    bool IsMultiDimensionalArray(GetElementPtrInst *gep) 
-    {
-        if(!gep) 
-            return false;
-
-        // Get base pointer of the buffer
-        Value* basePtr = gep->getPointerOperand();
-
-        // Check if the base pointer is a stack-allocated array
-        if (AllocaInst* alloca = dyn_cast<AllocaInst>(basePtr)) 
-        {
-            return IsMultiDimensionalArray(alloca);
-        }
-
-        return false;
-    }
-
-    void DetermineBaseTypeOfArray()
-    {
-        // TODO
-    }
-
-    bool IsStruct()
-    {
-        // TODO
-        return false;
-    }
-
-    void FreeBufferList() 
-    {
-        // TODO
     }
 
     virtual bool runOnModule(Module& M)
@@ -580,10 +105,6 @@ struct BufferMonitor : public ModulePass
         // Iterate over all functions in the module
         for (auto& F : M)
         {
-            // Functions to be skipped
-            if (this->skipFunctions.find(&F) != this->skipFunctions.end())
-                continue;
-
             // Process each function of the module
             procesFunction(F);
         }
@@ -608,16 +129,13 @@ struct BufferMonitor : public ModulePass
             // Check if the current instruction is an alloca instruction
             if (AllocaInst* allocaInst = dyn_cast<AllocaInst>(&*I))
             {
-                // This is an static allocation
+                /*
+                    This is an static allocation
+                */
 
                 // Check if the allocated type is an array
                 if (ArrayType* arrayType = dyn_cast<ArrayType>(allocaInst->getAllocatedType()))
                 {
-                    DEBUG_PRINT("Found a static allocation");
-                    #ifdef DEBUG
-                        // allocaInst->dump();
-                    #endif
-
                     // Determine the size of the array in bytes
                     unsigned arraySize = arrayType->getNumElements();
                     unsigned elementSizeInBytes = arrayType->getElementType()->getPrimitiveSizeInBits() / 8;
@@ -636,13 +154,16 @@ struct BufferMonitor : public ModulePass
                         bufferAddress = builder->CreateBitCast(allocaInst, Type::getInt8PtrTy(context));
                     }
                     
-                    InsertBufferToList(bufferAddress, bufferSizeValue);
+                    // Store statically allocated buffer in linked list
+                    this->builder->CreateCall(insertBufferNodeFunction, { bufferAddress, bufferSizeValue });
                 }    
             }
             
             if (auto callInst = dyn_cast<CallInst>(&*I)) 
             {
-                // This is an call instruction
+                /*
+                    This is an call instruction
+                */
 
                 Function *calledFunc = callInst->getCalledFunction();
                 if (calledFunc) 
@@ -662,25 +183,20 @@ struct BufferMonitor : public ModulePass
                         // Set insert point behind the current instruction
                         builder->SetInsertPoint(I->getNextNode());
 
-                        // Skip to next instruction
-                        // nextInstruction++;
-
                         Value* bufferAddress = callInst;                    // get address of allocated buffer
-                        Value* bufferSize = callInst->getArgOperand(0);     // get size of allocated buffer
+                        Value* bufferSizeValue = callInst->getArgOperand(0);     // get size of allocated buffer
 
                         // Store dynamically allocated buffer in linked list
-                        InsertBufferToList(bufferAddress, bufferSize);
+                        this->builder->CreateCall(insertBufferNodeFunction, { bufferAddress, bufferSizeValue });
                     }
                 }
             }
             
             if (GetElementPtrInst* gepInst = dyn_cast<GetElementPtrInst>(&*I)) 
             {
-                // This is a getelementptr instruction, a buffer is being accessed here
-                DEBUG_PRINT("Found a getelementptr instruction");
-                #ifdef DEBUG
-                    // gepInst->dump();
-                #endif
+                /*
+                    This is a getelementptr instruction, a buffer is being accessed here
+                */
 
                 builder->SetInsertPoint(&*I);
 
@@ -717,15 +233,12 @@ struct BufferMonitor : public ModulePass
                     }
                 }
                 
-                // Check if the gep instruction is performed on a multi-dimensional array
-                bool isMultiDimensionalArray = IsMultiDimensionalArray(gepInst);
-
                 int iteration = 0;
                 for (auto it = gepInst->idx_begin(); it != gepInst->idx_end(); it++, iteration++) 
                 {
                     // Determine accessed byte
                     Value* indexValue = it->get();
-                    Value* accessedBytes = builder->CreateMul(indexValue, ConstantInt::get(Type::getInt64Ty(context), elementSizeInBytes));
+                    Value* accessedByte = builder->CreateMul(indexValue, ConstantInt::get(Type::getInt64Ty(context), elementSizeInBytes));
 
                     // Cast the pointer to the buffer to a generic i8* pointer
                     if (basePtr->getType() != Type::getInt8PtrTy(context))
@@ -733,24 +246,8 @@ struct BufferMonitor : public ModulePass
                         basePtr = builder->CreateBitCast(basePtr, Type::getInt8PtrTy(context));
                     }
 
-                    // Get buffer with this base address from linked list
-                    CallInst* buffer = builder->CreateCall(getBufferFunction, { basePtr });
-                    // Get pointer type of BufferNode* using the default address space (0)
-                    PointerType* bufferNodePtrType = PointerType::get(BufferNodeTy, 0); 
-                    // Cast the return type of the getBufferFunction (CallInst) to BufferNode*
-                    Value* bufferNode = builder->CreateBitCast(buffer, bufferNodePtrType, "BufferNodePtr");
-
-                    // Update the highest accessed byte of the buffer node if the currently accessed byte is greater then
-                    // the highest accessed byte of the buffer node
-                    this->builder->CreateCall(setHighestAccessedByteFunction, { bufferNode, accessedBytes });
-                    
-                    // TODO: Write buffer access to shared memory
-
-                    /*
-                        // Write one to shared memory
-                        LoadInst* sharedMemoryValue = this->builder->CreateLoad(sharedMemory);
-                        this->builder->CreateStore(ConstantInt::get(Type::getInt8Ty(context), 1), sharedMemoryValue);
-                    */
+                    // Update the highest accessed byte of the currentl acessed buffer if accessedByte > highest_accessed_byte
+                    this->builder->CreateCall(updateHighestAccessedByteFunction, { basePtr, accessedByte });
                 }
             } 
 
